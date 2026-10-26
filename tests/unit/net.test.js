@@ -27,18 +27,28 @@ test('UTF-16 짝(이모지)을 가르지 않고 자른다', () => {
   }
 });
 
-test('큰 메시지는 나눠 보내고 받는 쪽에서 원래대로 합쳐진다', () => {
+const until = async (cond, ms = 5000) => { const t0 = Date.now(); while (!cond()) { if (Date.now() - t0 > ms) throw new Error('시간 초과'); await new Promise(r => setTimeout(r, 10)); } };
+
+test('큰 메시지는 줄이고 나눠 보내며, 받는 쪽에서 원래대로·보낸 순서대로 합쳐진다', async () => {
   const a = fakePair(), b = fakePair();
   const got = [];
+  const progress = [];
   const wa = Net.wrapConn(a.conn, { onMessage: () => {}, onClose: () => {}, log: () => {} });
-  const wb = Net.wrapConn(b.conn, { onMessage: m => got.push(m), onClose: () => {}, log: () => {} });
+  const wb = Net.wrapConn(b.conn, { onMessage: m => got.push(m), onClose: () => {}, onProgress: (g, n) => progress.push([g, n]), log: () => {} });
   const big = { t: 'welcome', units: {} };
-  for (let i = 0; i < 4000; i++) big.units['code:' + i] = JSON.stringify([[{ id: 'b' + i, type: 'text', params: ['안녕😀 블록 ' + i.toString().repeat(20)] }]]);
+  // 압축이 덜 되도록 조각마다 다른 값(실제 작품보다 불리한 경우)
+  for (let i = 0; i < 4000; i++) big.units['code:' + i] = JSON.stringify([[{ id: 'b' + i, type: 'text', params: ['안녕😀 블록 ' + Math.random().toString(36).repeat(3)] }]]);
+  wa.send({ t: 'mem', members: [] });
   wa.send(big);
   wa.send({ t: 'upd', seq: 1 });
-  assert.ok(a.sent.length > 3, '여러 조각으로 나뉘어야 함');
+  await until(() => a.sent.some(s => s.startsWith('M{"t":"upd"')));
+  const zipped = a.sent.filter(s => s[0] === 'G');
+  assert.ok(zipped.length > 1, '큰 메시지는 압축 조각(G)으로');
+  assert.ok(zipped.join('').length < JSON.stringify(big).length, '압축해서 더 작아야 함');
   for (const raw of a.sent) b.emit('data', raw);
-  assert.deepEqual(got, [big, { t: 'upd', seq: 1 }]);
+  await until(() => got.length === 3);
+  assert.deepEqual(got, [{ t: 'mem', members: [] }, big, { t: 'upd', seq: 1 }]);
+  assert.ok(progress.length > 1 && progress[progress.length - 1][0] === progress[progress.length - 1][1]);
   wa.close(); wb.close();
 });
 

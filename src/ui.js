@@ -80,7 +80,7 @@
       const s = state;
       const dot = $('.dot');
       dot.className = 'dot' + (s.mode === 'room' ? (s.link === 'down' ? ' warn' : ' on') : s.mode === 'connecting' ? ' warn' : '');
-      $('.fab-t').textContent = s.mode === 'room' ? `합작 ${(s.members || []).length}명` : '합작';
+      $('.fab-t').textContent = s.mode === 'room' ? `합작 ${(s.members || []).length}명` : s.mode === 'connecting' && s.joinText ? s.joinText : '합작';
       if (panel.hidden) return;
       panel.replaceChildren();
       const head = el('h3', {}, '엔트리 실시간 합작', el('button', { class: 'x', type: 'button', title: '닫기', onclick: () => { panel.hidden = true; } }, '✕'));
@@ -97,7 +97,7 @@
           el('p', { class: 'note' }, '지금 화면의 작품으로 방을 엽니다. 초대 코드를 친구에게 알려 주세요.'),
           el('hr'),
           el('label', {}, '초대 코드로 참여'), code,
-          el('button', { class: 'sub', type: 'button', disabled: busy, onclick: () => { const n = getName(); if (!n) return; if (!code.value.trim()) { code.focus(); toast('초대 코드를 적어 주세요', 'warn'); return; } handlers.onJoin(n, code.value); } }, busy && s.busyWhat === 'join' ? '연결 중…' : '참여하기'),
+          el('button', { class: 'sub', type: 'button', disabled: busy, onclick: () => { const n = getName(); if (!n) return; if (!code.value.trim()) { code.focus(); toast('초대 코드를 적어 주세요', 'warn'); return; } handlers.onJoin(n, code.value); } }, busy && s.busyWhat === 'join' ? (s.joinText || '연결 중…') : '참여하기'),
           el('p', { class: 'note' }, '참여하면 지금 화면의 작품이 방 작품으로 바뀝니다. 새 작품 화면에서 참여하세요.'),
         );
         return;

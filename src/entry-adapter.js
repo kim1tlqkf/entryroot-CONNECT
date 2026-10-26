@@ -11,22 +11,32 @@
     let applying = false;
     let hookedSm = null, hookedCce = null, hookedCmd = null, protoHooked = false, loadHooked = false;
 
-    // 큰 작품에서 매번 전체를 읽으면 화면이 멈춘다. 바뀐 오브젝트만 다시 읽고 나머지는 지난 결과를 쓴다.
+    // 큰 작품에서 매번 전체를 읽으면 화면이 멈춘다. 바뀐 오브젝트·함수만 다시 읽고 나머지는 지난 결과를 쓴다.
     const objCache = new Map();
+    const funcCache = new Map();
+    // 큰 오브젝트에서 한 묶음만 바뀌어도 전체를 다시 정리하지 않도록 묶음별 정리 결과를 둔다
+    const threadCache = new Map();
+    const threadCacheFor = () => { if (threadCache.size > 50000) threadCache.clear(); return threadCache; };
     let globalsCache = null;
-    const dirtyObjs = new Set();
-    let allDirty = true, globalsDirty = true;
+    const dirtyObjs = new Set(), dirtyFuncs = new Set();
+    // 함수는 큰 작품에서 수 MB라, 함수 쪽 신호가 있을 때만(또는 처음 한 번) 전부 읽는다
+    let allDirty = true, globalsDirty = true, funcsAllDirty = true;
     const watchedCodes = new WeakSet();
     const markAll = () => { allDirty = true; globalsDirty = true; };
-    // 명령을 거치지 않은 변경을 놓치지 않게 조금씩 다시 본다(한꺼번에 전체를 읽으면 큰 작품에서 화면이 멈춘다)
-    let scanAt = 0;
+    // 명령을 거치지 않은 변경을 놓치지 않게 조금씩 돌아가며 다시 본다
+    let scanAt = 0, funcScanAt = 0, lastInputAt = 0;
     function scanSome(count) {
+      // 편집하는 동안 멈춤에 보태지 않도록, 3초 넘게 아무 조작이 없을 때만 돈다
+      if (Date.now() - lastInputAt < 3000) return;
       try {
         const objs = E().container.getAllObjects();
-        if (!objs.length) return;
-        for (let i = 0; i < Math.min(count, objs.length); i++) dirtyObjs.add(String(objs[(scanAt + i) % objs.length].id));
-        scanAt = (scanAt + count) % objs.length;
-        if (scanAt < count) globalsDirty = true;
+        if (objs.length) {
+          for (let i = 0; i < Math.min(count, objs.length); i++) dirtyObjs.add(String(objs[(scanAt + i) % objs.length].id));
+          scanAt = (scanAt + count) % objs.length;
+          if (scanAt < count) globalsDirty = true;
+        }
+        const fids = Object.keys(E().variableContainer.functions_ || {});
+        if (fids.length) { dirtyFuncs.add(fids[funcScanAt % fids.length]); funcScanAt = (funcScanAt + 1) % fids.length; }
       } catch (err) { log('scan', err); }
     }
 
@@ -39,6 +49,8 @@
       'showAllComment', 'hideAllComment']);
     // 화면만 바꾸는 명령(작품 내용은 그대로)
     const VIEW_ONLY_CMD = /^(selectBlockMenu|selectObject|containerSelectObject|sceneSelect|playgroundChangeViewMode|toggleRun|toggleStop|dismissModal|variableContainerSelectFilter|objectEditButtonClick|addObjectButtonClick)$|Click|Cancel$/;
+    const FUNC_CMD = /^func|Func|LocalVariable/;
+    const GLOBAL_CMD = /^(variable|list|message|scene|dataTable|objectReorder|addObject|removeObject|objectAdd(Expansion|AIUtilize|HardwareLite)|objectRemove(Expansion|AIUtilize|HardwareLite))/;
     let cmdNames = null;
     function cmdName(type) {
       if (typeof type === 'string') return type;
@@ -49,26 +61,44 @@
       }
       return cmdNames.get(type) || null;
     }
+    function markTargetFunc() {
+      try { const f = E().Func && E().Func.targetFunc; if (f && f.id != null) dirtyFuncs.add(String(f.id)); } catch { /* 편집 중인 함수 없음 */ }
+    }
     function markBoard() {
       const k = boardKey();
       if (k && k.startsWith('obj:')) dirtyObjs.add(k.slice(4));
-      else { globalsDirty = true; if (!k) allDirty = true; }
+      else if (k && k.startsWith('func:')) dirtyFuncs.add(k.slice(5));
+      else { markTargetFunc(); globalsDirty = true; }
     }
     function onCommand(type, args) {
       const name = cmdName(type);
       if (!name) { markAll(); return; }
       if (BLOCK_CMDS.has(name)) { markBoard(); return; }
       if (VIEW_ONLY_CMD.test(name)) return;
-      const a0 = Array.isArray(args) ? args[0] : undefined;
+      const list = Array.isArray(args) ? args : [];
+      if (FUNC_CMD.test(name)) {
+        markTargetFunc();
+        const fns = E().variableContainer.functions_ || {};
+        for (const a of list) if ((typeof a === 'string' || typeof a === 'number') && fns[a]) dirtyFuncs.add(String(a));
+        globalsDirty = true;
+        return;
+      }
+      const a0 = list[0];
       if ((typeof a0 === 'string' || typeof a0 === 'number') && getObj(a0)) { dirtyObjs.add(String(a0)); globalsDirty = true; return; }
+      if (GLOBAL_CMD.test(name)) { globalsDirty = true; return; }
+      // 모양·소리·글상자 편집처럼 대상 id가 없는 명령은 지금 고른 오브젝트
+      if (/Picture|Sound|Text/.test(name)) {
+        const o = E().playground && E().playground.object;
+        if (o) dirtyObjs.add(String(o.id));
+        globalsDirty = true;
+        return;
+      }
       markAll();
     }
-    function watchCode(o) {
-      const c = o.script;
-      if (!c || !c.changeEvent || typeof c.changeEvent.attach !== 'function' || watchedCodes.has(c)) return;
-      watchedCodes.add(c);
-      const id = String(o.id);
-      c.changeEvent.attach(null, () => { dirtyObjs.add(id); });
+    function watchCode(code, onChange) {
+      if (!code || !code.changeEvent || typeof code.changeEvent.attach !== 'function' || watchedCodes.has(code)) return;
+      watchedCodes.add(code);
+      code.changeEvent.attach(null, onChange);
     }
 
     function ready() {
@@ -148,7 +178,8 @@
       return true;
     }
 
-    const down = ev => { if (ev.button === 0 && !isOwnUi(ev.target)) pointerDown = true; };
+    const down = ev => { lastInputAt = Date.now(); if (ev.button === 0 && !isOwnUi(ev.target)) pointerDown = true; };
+    window.addEventListener('keydown', () => { lastInputAt = Date.now(); }, true);
     const up = () => { if (pointerDown) { pointerDown = false; onLocalChange(); } };
     window.addEventListener('pointerdown', down, true);
     window.addEventListener('mousedown', down, true);
@@ -176,20 +207,26 @@
     }
 
     // 오브젝트를 뺀 나머지(장면·변수·함수·표·설정)는 엔트리의 같은 내보내기로 읽되, 오브젝트 직렬화만 건너뛴다
+    // 오브젝트·함수를 뺀 나머지(장면·변수·신호·표·설정)는 엔트리의 같은 내보내기로 읽되, 큰 두 부분의 직렬화만 건너뛴다
     function globalsViaExport() {
-      const c = E().container;
-      const own = Object.prototype.hasOwnProperty.call(c, 'toJSON');
-      const prev = c.toJSON;
-      c.toJSON = () => [{}];
-      try { return E().exportProject(); } finally { if (own) c.toJSON = prev; else delete c.toJSON; }
+      const e = E();
+      const stubs = [[e.container, 'toJSON', () => [{}]], [e.variableContainer, 'getFunctionJSON', () => []]];
+      const saved = stubs.map(([o, k]) => [Object.prototype.hasOwnProperty.call(o, k), o[k]]);
+      for (const [o, k, f] of stubs) o[k] = f;
+      try { return e.exportProject(); } finally {
+        stubs.forEach(([o, k], i) => { if (saved[i][0]) o[k] = saved[i][1]; else delete o[k]; });
+      }
     }
+    // 엔트리 getFunctionJSON이 함수 하나에 대해 만드는 것과 같은 모양
+    const funcJSON = f => ({ id: f.id, type: f.type === undefined ? 'normal' : f.type, localVariables: f.localVariables, useLocalVariables: f.useLocalVariables, content: f.content.stringify() });
+    const offKeyOf = k => { const off = offsets.get(k); return off ? off[0] + ',' + off[1] : '0,0'; };
 
     function exportUnits() {
       if (!canRead()) return null;
       try { flushLazyPositions(); } catch (err) { log('flush positions', err); }
       const e = E();
       const units = {};
-      const ids = [];
+      const ids = [], fids = [];
       const seen = new Set();
       try {
         const objs = e.container.getAllObjects();
@@ -200,37 +237,73 @@
           const id = String(o.id);
           if (seen.has(id)) continue;
           seen.add(id); ids.push(id);
-          watchCode(o);
-          const off = offsets.get('obj:' + id);
-          const offKey = off ? off[0] + ',' + off[1] : '0,0';
+          watchCode(o.script, () => dirtyObjs.add(id));
+          const offKey = offKeyOf('obj:' + id);
           let c = objCache.get(id);
-          if (full || !c || dirtyObjs.has(id) || c.offKey !== offKey) {
+          // 다른 확장이 코드를 통째로 바꿔 끼운 경우도 잡는다(scriptRef)
+          if (full || !c || dirtyObjs.has(id) || c.offKey !== offKey || c.scriptRef !== o.script) {
             const j = o.toJSON();
             const raw = JSON.stringify(j);
             if (!c || c.raw !== raw || c.offKey !== offKey) {
-              const u = M.objectUnits(j, off);
-              c = { raw, offKey, obj: u.obj, code: u.code };
+              const u = M.objectUnits(j, offsets.get('obj:' + id), threadCacheFor());
+              c = { raw, offKey, scriptRef: o.script, obj: u.obj, code: u.code };
               objCache.set(id, c);
-            }
+            } else c.scriptRef = o.script;
           }
           units['obj:' + id] = c.obj;
           units['code:' + id] = c.code;
         }
         for (const id of [...objCache.keys()]) if (!seen.has(id)) objCache.delete(id);
+
+        const fns = e.variableContainer.functions_ || {};
+        for (const fid of Object.keys(fns)) {
+          const f = fns[fid];
+          if (!f || !f.content) continue;
+          fids.push(fid);
+          watchCode(f.content, () => dirtyFuncs.add(fid));
+          const offKey = offKeyOf('func:' + fid);
+          let c = funcCache.get(fid);
+          if (funcsAllDirty || !c || dirtyFuncs.has(fid) || c.offKey !== offKey || c.contentRef !== f.content) {
+            c = { offKey, contentRef: f.content, unit: M.funcUnit(funcJSON(f), offsets.get('func:' + fid)) };
+            funcCache.set(fid, c);
+          }
+          units['func:' + fid] = c.unit;
+        }
+        const fset = new Set(fids);
+        for (const fid of [...funcCache.keys()]) if (!fset.has(fid)) funcCache.delete(fid);
+
         if (full || globalsDirty || !globalsCache) {
           const g = globalsViaExport();
           if (!g) return null;
-          delete g.objects; delete g.interface;
-          const funcOff = [...offsets].filter(([k]) => k.startsWith('func:')).map(([k, v]) => k + '=' + v).join(';');
-          const raw = JSON.stringify(g) + '|' + funcOff;
+          delete g.objects; delete g.interface; delete g.functions;
+          const raw = JSON.stringify(g);
           if (!globalsCache || globalsCache.raw !== raw) globalsCache = { raw, units: M.globalUnits(g, k => offsets.get(k)) };
         }
       } catch (err) { log('export', err); return null; }
       Object.assign(units, globalsCache.units);
       units.objOrder = M.stable(ids);
-      dirtyObjs.clear();
-      allDirty = false; globalsDirty = false;
+      units.funcOrder = M.stable(fids);
+      dirtyObjs.clear(); dirtyFuncs.clear();
+      allDirty = false; globalsDirty = false; funcsAllDirty = false;
       return units;
+    }
+
+    // 막 불러온 작품은 곧 이 조각들이다 — 큰 작품에서 불러온 직후 수 MB를 다시 읽지 않도록 캐시에 바로 넣는다
+    function primeFrom(units) {
+      const e = E();
+      objCache.clear(); funcCache.clear();
+      for (const o of e.container.getAllObjects()) {
+        const id = String(o.id);
+        if (units['obj:' + id] == null) continue;
+        objCache.set(id, { raw: null, offKey: offKeyOf('obj:' + id), scriptRef: o.script, obj: units['obj:' + id], code: units['code:' + id] == null ? '[]' : units['code:' + id] });
+      }
+      const fns = e.variableContainer.functions_ || {};
+      for (const fid of Object.keys(fns)) {
+        if (units['func:' + fid] == null || !fns[fid] || !fns[fid].content) continue;
+        funcCache.set(fid, { offKey: offKeyOf('func:' + fid), contentRef: fns[fid].content, unit: units['func:' + fid] });
+      }
+      dirtyObjs.clear(); dirtyFuncs.clear();
+      allDirty = false; funcsAllDirty = false; globalsDirty = true;
     }
 
     const getObj = id => { try { return E().container.getObject(id) || null; } catch { return null; } };
@@ -266,30 +339,44 @@
       return false;
     }
 
-    const OBJ_TARGET_FIELDS = new Set(['entity', 'name', 'lock', 'rotateMethod', 'selectedPictureId']);
+    // 이 필드들은 작품을 다시 불러오지 않고 그 오브젝트에만 넣는다(모양·소리는 하나씩 더하고 빼기)
+    const OBJ_TARGET_FIELDS = new Set(['entity', 'name', 'lock', 'rotateMethod', 'selectedPictureId', 'sprite', 'text']);
+    const SYSTEM_VAR_TYPES = new Set(['timer', 'answer', 'stt']);
     function changedFields(a, b) {
       const out = [];
       for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) if (M.stable(a[k]) !== M.stable(b[k])) out.push(k);
       return out;
     }
+    const varType = s => { try { return s == null ? null : JSON.parse(s).variableType; } catch { return null; } };
 
+    // 큰 작품은 다시 불러오기에 수십 초가 걸려, 자주 바뀌는 것(블록·오브젝트 속성·모양·함수·변수·신호)은 그 부분만 넣는다
     function plan(toApply, current) {
-      let full = false;
-      const code = [], obj = [];
+      const p = { full: false, code: [], obj: [], func: [], vars: [], msgs: false };
       for (const k of Object.keys(toApply)) {
         const v = toApply[k];
         if (k.startsWith('code:')) {
-          if (v == null || !getObj(k.slice(5))) { full = true; continue; }
-          code.push(k);
+          if (v == null || !getObj(k.slice(5))) { p.full = true; continue; }
+          p.code.push(k);
         } else if (k.startsWith('obj:')) {
           const old = current && current[k];
-          if (v == null || old == null || !getObj(k.slice(4))) { full = true; continue; }
-          const diff = changedFields(JSON.parse(old), JSON.parse(v));
-          if (diff.some(f => !OBJ_TARGET_FIELDS.has(f))) { full = true; continue; }
-          obj.push(k);
-        } else full = true;
+          if (v == null || old == null || !getObj(k.slice(4))) { p.full = true; continue; }
+          const ov = JSON.parse(old), nv = JSON.parse(v);
+          const diff = changedFields(ov, nv);
+          if (diff.some(f => !OBJ_TARGET_FIELDS.has(f))) { p.full = true; continue; }
+          if (diff.includes('sprite') && changedFields(ov.sprite || {}, nv.sprite || {}).some(f => f !== 'pictures' && f !== 'sounds')) { p.full = true; continue; }
+          p.obj.push(k);
+        } else if (k.startsWith('func:')) {
+          p.func.push(k);
+        } else if (k.startsWith('var:')) {
+          if (SYSTEM_VAR_TYPES.has(varType(v)) || SYSTEM_VAR_TYPES.has(varType(current && current[k]))) { p.full = true; continue; }
+          p.vars.push(k);
+        } else if (k.startsWith('msg:') || k === 'msgOrder') {
+          p.msgs = true;
+        } else if (k === 'funcOrder' || k === 'varOrder') {
+          // 순서만: 함수·변수를 넣고 빼면서 같이 맞춘다
+        } else p.full = true;
       }
-      return { full, code, obj };
+      return p;
     }
 
     function isSafe(toApply, current) {
@@ -306,7 +393,7 @@
         if (mode === 'sound') return false;
         return true;
       }
-      if (p.obj.length && focus) return false;
+      if ((p.obj.length || p.vars.length || p.msgs || p.func.length) && focus) return false;
       const bk = boardKey();
       if (bk && p.code.includes('code:' + bk.slice(4)) && bk.startsWith('obj:')) {
         if (viewMode() !== 'code') return false;
@@ -322,35 +409,175 @@
       if (hit && typeof sm.clear === 'function') sm.clear();
     }
 
-    function applyCode(k, v) {
+    // 블록 화면에 열린 큰 오브젝트도 바뀐 묶음만 지우고 새로 넣는다(전체를 다시 그리면 수 초 멈춤).
+    // 내 화면 코드가 직전 조각과 묶음 단위로 맞지 않거나 순서가 바뀌었으면 false(통째로 바꾸기로).
+    function patchThreads(code, oldT, newT, off, board) {
+      const oldKeys = oldT.map((th, i) => M.threadKey(th, i));
+      const newKeys = newT.map((th, i) => M.threadKey(th, i));
+      if ([...oldKeys, ...newKeys].some(k => k.startsWith('i:'))) return false;
+      if (new Set(oldKeys).size !== oldKeys.length || new Set(newKeys).size !== newKeys.length) return false;
+      const live = code.getThreads();
+      if (live.length !== oldT.length) return false;
+      for (let i = 0; i < live.length; i++) {
+        const fb = live[i].getFirstBlock();
+        if (!fb || 't:' + fb.id !== oldKeys[i]) return false;
+      }
+      const oldStr = new Map(oldT.map((th, i) => [oldKeys[i], M.stable(th)]));
+      const changed = new Set(newKeys.filter((k, i) => oldStr.get(k) !== M.stable(newT[i])));
+      const newSet = new Set(newKeys);
+      const kept = newKeys.filter(k => oldStr.has(k) && !changed.has(k));
+      const keptOld = oldKeys.filter(k => newSet.has(k) && !changed.has(k));
+      if (kept.join('\n') !== keptOld.join('\n')) return false;
+      for (let i = live.length - 1; i >= 0; i--) if (!newSet.has(oldKeys[i]) || changed.has(oldKeys[i])) live[i].destroy(false);
+      newT.forEach((th, i) => {
+        const k = newKeys[i];
+        if (oldStr.has(k) && !changed.has(k)) return;
+        const t = code.createThread(JSON.parse(JSON.stringify(M.decanonThreads([th], off)[0])), i);
+        if (board && t && !t.view) t.createView(board);
+      });
+      return true;
+    }
+
+    function applyCode(k, v, oldStr) {
       const id = k.slice(5);
       const obj = getObj(id);
-      const threads = M.decanonThreads(JSON.parse(v), offsets.get('obj:' + id));
+      const off = offsets.get('obj:' + id);
       const ws = E().getMainWS();
       const onBoard = !!(ws && ws.board && ws.board.code === obj.script);
-      const old = obj.script;
-      const nc = new (E().Code)(threads, obj);
-      obj.script = nc;
-      if (onBoard) ws.changeBoardCode(nc);
-      try { if (old && old.clearExecutors) old.clearExecutors(); } catch { /* 옛 코드 정리는 실패해도 됨 */ }
+      let patched = false;
+      if (oldStr) {
+        try { patched = patchThreads(obj.script, JSON.parse(oldStr), JSON.parse(v), off, onBoard ? ws.board : null); } catch (err) { log('patch threads', err); patched = false; }
+      }
+      if (!patched) {
+        const threads = M.decanonThreads(JSON.parse(v), off);
+        const old = obj.script;
+        const nc = new (E().Code)(threads, obj);
+        obj.script = nc;
+        if (onBoard) ws.changeBoardCode(nc);
+        try { if (old && old.clearExecutors) old.clearExecutors(); } catch { /* 옛 코드 정리는 실패해도 됨 */ }
+      }
       // 실행 취소가 옛 블록 자리(순서 번호)를 가리켜 남의 블록을 지울 수 있어, 이 오브젝트를 건드린 기록이 있으면 비운다
       dropUndoIfTouches('obj:' + id, onBoard);
       dirtyObjs.add(id);
+    }
+
+    const clone = x => JSON.parse(JSON.stringify(x));
+    // 목록(모양·소리)을 받은 목록과 같게: 새것은 그 자리에 더하고, 바뀐 것은 바꾸고, 없는 것은 뺀다(마지막 하나는 엔트리가 못 빼므로 더하기부터)
+    // asJSON: 살아 있는 항목을 엔트리 내보내기와 같은 모양으로(살아 있는 객체엔 내보내기에 없는 값이 붙어 있다)
+    function syncList(now, want, asJSON, { add, remove, replace }) {
+      const byId = new Map(now.map(x => [String(x.id), x]));
+      want.forEach((w, i) => {
+        const cur = byId.get(String(w.id));
+        if (!cur) add(clone(w), i);
+        else if (M.stable(asJSON(cur)) !== M.stable(w)) replace(clone(w), i);
+      });
+      const keep = new Set(want.map(w => String(w.id)));
+      for (const x of [...now]) if (!keep.has(String(x.id))) remove(x.id);
     }
 
     function applyObj(k, v, oldStr) {
       const id = k.slice(4);
       const o = getObj(id);
       const nv = JSON.parse(v), ov = JSON.parse(oldStr);
+      const pg = E().playground;
+      if (nv.sprite && M.stable(nv.sprite.pictures) !== M.stable(ov.sprite && ov.sprite.pictures)) {
+        const picJSON = x => (E().getPicturesJSON ? E().getPicturesJSON([x])[0] : x);
+        syncList(o.pictures, nv.sprite.pictures || [], picJSON, {
+          add: (pic, i) => o.addPicture(pic, i),
+          remove: pid => o.removePicture(pid),
+          replace: pic => {
+            const wasSelected = o.selectedPicture && String(o.selectedPicture.id) === String(pic.id);
+            E().container.setPicture({ ...pic, objectId: o.id });
+            // setPicture는 모양 객체를 새로 만든다 — 고른 모양이 옛 객체를 가리키면 엔트리 내보내기가 깨진다
+            if (wasSelected) o.selectPicture(pic.id);
+          },
+        });
+        const order = (nv.sprite.pictures || []).map(x => String(x.id));
+        o.pictures.sort((a, b) => order.indexOf(String(a.id)) - order.indexOf(String(b.id)));
+        if (o.pictures.length && o.pictures.indexOf(o.selectedPicture) < 0) o.selectPicture((nv.selectedPictureId && o.getPicture(nv.selectedPictureId)) ? nv.selectedPictureId : o.pictures[0].id);
+        if (pg.object === o) pg.injectPicture(o);
+      }
+      if (nv.sprite && M.stable(nv.sprite.sounds) !== M.stable(ov.sprite && ov.sprite.sounds)) {
+        const sndJSON = x => (E().getSoundsJSON ? E().getSoundsJSON([x])[0] : x);
+        syncList(o.sounds, nv.sprite.sounds || [], sndJSON, {
+          add: (snd, i) => o.addSound(snd, i),
+          remove: sid => o.removeSound(sid),
+          replace: (snd, i) => { o.removeSound(snd.id); o.addSound(snd, i); },
+        });
+        const order = (nv.sprite.sounds || []).map(x => String(x.id));
+        o.sounds.sort((a, b) => order.indexOf(String(a.id)) - order.indexOf(String(b.id)));
+        if (o.selectedSound && o.sounds.indexOf(o.selectedSound) < 0) o.selectedSound = o.sounds[0];
+        if (pg.object === o) pg.injectSound(o);
+      }
+      if (nv.selectedPictureId && (nv.selectedPictureId !== ov.selectedPictureId || !o.selectedPicture || String(o.selectedPicture.id) !== String(nv.selectedPictureId))) o.selectPicture(nv.selectedPictureId);
+      if (typeof nv.text === 'string' && nv.text !== ov.text) o.setText(nv.text);
       if (M.stable(nv.entity) !== M.stable(ov.entity) && nv.entity) o.entity.setModel(nv.entity);
-      if (nv.name !== ov.name && typeof nv.name === 'string') { o.setName(nv.name); E().playground.updateObjectTitle(o); }
+      if (nv.name !== ov.name && typeof nv.name === 'string') { o.setName(nv.name); pg.updateObjectTitle(o); }
       if (nv.lock !== ov.lock) o.setLock(!!nv.lock);
       if (nv.rotateMethod !== ov.rotateMethod && nv.rotateMethod) o.setRotateMethod(nv.rotateMethod);
-      if (nv.selectedPictureId !== ov.selectedPictureId && nv.selectedPictureId) o.selectPicture(nv.selectedPictureId);
       if (o.updateCoordinateView) o.updateCoordinateView();
       if (o.updateRotationView) o.updateRotationView();
+      if (o.updateThumbnailView) o.updateThumbnailView();
       if (E().stage && E().stage.updateObject) E().stage.updateObject();
       dirtyObjs.add(id);
+    }
+
+    // 함수: 정의만 바꿔 끼운다. 엔트리 removeFunction은 그 함수를 쓰는 블록까지 모두 지우므로 쓰지 않는다.
+    function applyFuncs(keys, toApply) {
+      const vc = E().variableContainer;
+      const fns = vc.functions_;
+      for (const k of keys) {
+        const id = k.slice(5);
+        const v = toApply[k];
+        const old = fns[id];
+        if (v == null) {
+          if (old) { try { old.destroy(); } catch (err) { log('func destroy', err); } delete fns[id]; }
+        } else {
+          const json = M.decanonFunc(JSON.parse(v), offsets.get('func:' + id));
+          const nf = new (E().Func)(json);
+          nf.generateBlock();
+          fns[id] = nf;
+          if (old && old !== nf) { try { old.destroy(); } catch (err) { log('func destroy', err); } }
+        }
+        dirtyFuncs.add(id);
+      }
+      globalsDirty = true;
+      if (vc.updateList) vc.updateList();
+    }
+
+    // 변수·리스트: 바뀐 것은 빼고 다시 넣는다(블록은 id로 가리키므로 그대로), 그다음 받은 순서로 줄 세운다
+    function applyVars(keys, toApply, current) {
+      const vc = E().variableContainer;
+      for (const k of keys) {
+        const id = k.slice(4);
+        const v = toApply[k];
+        const curVar = (vc.variables_ || []).find(x => String(x.id_) === id);
+        const curList = (vc.lists_ || []).find(x => String(x.id_) === id);
+        if (curVar) vc.removeVariable(curVar);
+        if (curList) vc.removeList(curList);
+        if (v != null) vc.appendVariables([JSON.parse(v)]);
+      }
+      const orderStr = toApply.varOrder != null ? toApply.varOrder : current && current.varOrder;
+      if (orderStr) {
+        const order = JSON.parse(orderStr).map(String);
+        const pos = x => { const i = order.indexOf(String(x.id_)); return i < 0 ? 1e9 : i; };
+        vc.variables_.sort((a, b) => pos(a) - pos(b));
+        vc.lists_.sort((a, b) => pos(a) - pos(b));
+      }
+      if (vc.updateViews) vc.updateViews();
+      if (vc.updateList) vc.updateList();
+      globalsDirty = true;
+    }
+
+    // 신호: 받은 순서 그대로 목록을 바꾼다
+    function applyMsgs(toApply, current) {
+      const vc = E().variableContainer;
+      const get = k => (k in toApply ? toApply[k] : current && current[k]);
+      const order = JSON.parse(get('msgOrder') || '[]').map(String);
+      const list = order.map(id => get('msg:' + id)).filter(x => x != null).map(x => JSON.parse(x));
+      vc.setMessages(list);
+      if (vc.updateList) vc.updateList();
+      globalsDirty = true;
     }
 
     // 글상자 크기처럼 컴퓨터마다 다르게 계산되는 값은 비교에서 뺀다
@@ -387,7 +614,8 @@
     // 다시 불러오기가 실패하거나 일부만 들어오면 원래 작품으로 되돌리고 예외를 던진다.
     // 비워진·반쯤 찬 화면이 남으면 다음 확인 때 "내가 지운 것"으로 방 전체에 퍼지기 때문이다.
     // current: 지금 화면 조각(있으면 되돌릴 작품을 다시 내보내지 않고 이걸로 만든다)
-    function loadUnits(units, current) {
+    // opts.fresh: 처음 참여 — 보던 화면이 내 기본 작품 것이라 되살리지 않는다(큰 오브젝트를 괜히 다시 그리게 됨)
+    function loadUnits(units, current, opts = {}) {
       const e = E();
       const view = captureView();
       const pid = e.projectId;
@@ -411,7 +639,8 @@
         }
       } finally { applying = false; }
       if (pid !== undefined) e.projectId = pid;
-      restoreView(view);
+      if (failure) { markAll(); funcsAllDirty = true; } else primeFrom(units);
+      if (!opts.fresh) restoreView(view);
       ensureHooks();
       if (failure) throw failure;
     }
@@ -422,16 +651,22 @@
       if (!p.full) {
         applying = true;
         try {
-          for (const k of p.code) applyCode(k, toApply[k]);
+          // 함수·변수·신호를 먼저(블록이 가리킬 대상), 그다음 오브젝트·블록
+          if (p.func.length) applyFuncs(p.func, toApply);
+          if (p.vars.length) applyVars(p.vars, toApply, current);
+          if (p.msgs) applyMsgs(toApply, current);
           for (const k of p.obj) applyObj(k, toApply[k], current[k]);
+          for (const k of p.code) applyCode(k, toApply[k], current[k]);
         } catch (err) {
-          log('targeted apply 실패, 다시 불러오기로', err);
+          log('부분 반영 실패, 다시 불러오기로', err);
           p.full = true;
         } finally { applying = false; }
         if (!p.full) {
           const after = exportUnits();
-          if (after && Object.keys(toApply).every(k => sameish(k, after[k] == null ? null : after[k], toApply[k]))) return false;
-          log('부분 반영 결과가 방과 달라 다시 불러오기로', Object.keys(toApply));
+          // 순서 목록은 넣고 빼는 동안 엔트리가 정하는 자리가 있어 비교에서 뺀다(내용 조각은 모두 같아야 함)
+          const bad = after ? Object.keys(toApply).filter(k => !/Order$/.test(k) && !sameish(k, after[k] == null ? null : after[k], toApply[k])) : ['(읽기 실패)'];
+          if (!bad.length) return false;
+          log('부분 반영 결과가 방과 달라 다시 불러오기로', bad);
         }
       }
       const units = {};
@@ -456,7 +691,7 @@
     function stopRunning() { try { if (isRunning()) E().engine.toggleStop(); } catch (err) { log('stop', err); } }
 
     return {
-      ready, ensureHooks, exportUnits, isSafe, apply, loadAll: loadUnits, where, objectName, isDefaultProject,
+      ready, ensureHooks, exportUnits, isSafe, apply, loadAll: (units, opts) => loadUnits(units, null, opts), where, objectName, isDefaultProject,
       isRunning, stopRunning, isBusy: () => pointerDown || applying, markAllDirty: markAll, scanSome,
       _offsets: offsets,
     };

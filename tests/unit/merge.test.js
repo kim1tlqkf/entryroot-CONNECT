@@ -134,3 +134,14 @@ test('정리: 지운 오브젝트의 코드·지역 변수는 지우고, 없는 
   assert.deepEqual(JSON.parse(st.get('varOrder')), []);
   assert.ok(ch.size > 0);
 });
+
+test('묶음별 정리 결과를 재사용해도 전체를 정리한 것과 글이 같다', () => {
+  const threads = [thread('a', 10.5, 20, blk('a1', 'move_x', { params: [{ id: 'n1', type: 'number', params: ['3'] }, null] })), thread('b', 300, 40, blk('b1')), [{ id: 'cm', type: 'comment', x: 5, y: 6, value: '메모' }]];
+  const cache = new Map();
+  for (const off of [[0, 0], [-33.3, 12.7], [-33.3, 12.7]]) {
+    assert.equal(M.codeUnit(threads, off, cache), M.stable(M.canonThreads(threads, off)));
+  }
+  assert.ok(cache.size > 0);
+  const o = { id: 'o', name: 'n', script: JSON.stringify(threads), entity: { x: 1 } };
+  assert.deepEqual(M.objectUnits(o, [2, 3], cache), M.objectUnits(o, [2, 3]));
+});

@@ -163,6 +163,15 @@ const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes
     await A.waitFor(`Entry.container.getObject(${JSON.stringify(objId)}).name === '바뀐이름'`, 10000, 'A 이름 반영');
     check('오브젝트 이름이 다시 불러오기 없이 반영', await A.evalJs(`Entry.container.getObject(${JSON.stringify(objId)}).__e2eMark === 1`));
 
+    // ── 모양 추가(명령), 지금 고른 모양의 내용 바꾸기: 다시 불러오기 없이 반영되고 받는 쪽 내보내기가 깨지지 않음 ──
+    await B.evalJs(`Entry.container.getObject(${JSON.stringify(objId)}).__e2eMark = 2; true`);
+    await A.evalJs(`(() => { const o = Entry.container.getObject(${JSON.stringify(objId)}); const pic = { ...Entry.getPicturesJSON([o.pictures[0]])[0], id: 'e2ePic1', name: '시험모양' }; Entry.do('objectAddPicture', ${JSON.stringify(objId)}, pic); return true; })()`);
+    await B.waitFor(`!!Entry.container.getObject(${JSON.stringify(objId)}).getPicture('e2ePic1')`, 15000, 'B에 모양');
+    await A.evalJs(`(() => { const o = Entry.container.getObject(${JSON.stringify(objId)}); const sel = o.selectedPicture; Entry.container.setPicture({ ...Entry.getPicturesJSON([sel])[0], objectId: o.id, name: '바뀐모양이름' }); o.selectPicture(sel.id); Entry.do('objectUpdatePosY', o.id, 33); return true; })()`);
+    await B.waitFor(`Entry.container.getObject(${JSON.stringify(objId)}).pictures.some(p => p.name === '바뀐모양이름')`, 20000, 'B 모양 이름');
+    check('모양 추가·고른 모양 바꾸기가 다시 불러오기 없이 반영', (await B.evalJs(`Entry.container.getObject(${JSON.stringify(objId)}).__e2eMark === 2`)) && (await B.evalJs(`!!__entryHapjak.exportUnits()`)));
+    await converged(A, B, '모양 바꾼 뒤 같은 작품');
+
     // ── 변수 추가(엔트리 화면의 변수 추가와 같은 명령) ──
     await A.evalJs(`Entry.do('variableContainerAddVariable', new Entry.Variable({ id: 'e2eVar', name: '점수e2e', variableType: 'variable', value: 5, visible: true })); true`);
     await B.waitFor(`!!Entry.variableContainer.getVariable('e2eVar')`, 15000, 'B에 변수');
@@ -282,12 +291,13 @@ const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes
       await converged(A, B, '메뉴 닫은 뒤 같은 작품');
     }
 
-    // ── 방장 쪽이 20초 멈춤(인터넷 끊김 흉내) → 참가자가 다시 붙고, 그동안 고친 게 살아남음 ──
+    // ── 방장 쪽이 1분 넘게 멈춤(인터넷 끊김 흉내) → 참가자가 다시 붙고, 그동안 고친 게 살아남음 ──
     await A.send('Debugger.enable');
     await A.send('Debugger.pause');
     await sleep(1000);
     await B.evalJs(`Entry.container.selectObject(${JSON.stringify(objId)}); Entry.do('addThread', [{ id: 'e2eOffline', type: 'when_run_button_click', x: 100, y: 700, params: [null] }]); true`);
-    await B.waitFor(`__entryHapjak.status().link === 'down'`, 30000, 'B가 끊김을 알아챔');
+    // 큰 작품을 불러오는 동안의 멈춤을 끊김으로 오판하지 않도록 60초까지는 기다린다 — 그보다 오래 멈춰야 끊김으로 본다
+    await B.waitFor(`__entryHapjak.status().link === 'down'`, 90000, 'B가 끊김을 알아챔');
     const offlineUi = await B.evalJs(`document.getElementById('entry-hapjak-root').shadowRoot.querySelector('.fab .dot').className`);
     await sleep(3000);
     await A.send('Debugger.resume');

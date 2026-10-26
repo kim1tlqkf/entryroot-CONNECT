@@ -151,6 +151,14 @@
     }
   }
 
+  let lastJoinProgress = 0, progressShown = 0;
+  function onJoinProgress(got, total) {
+    lastJoinProgress = Date.now();
+    if (joined) return;
+    const pct = Math.floor(got / total * 100);
+    if (pct !== progressShown) { progressShown = pct; ui.set({ joinText: `방 작품 받는 중 ${pct}%` }); }
+  }
+
   async function firstWelcome(msg) {
     // 블록을 끄는 중이거나 실행 중이면 끝난 뒤 바꾼다
     for (let i = 0; i < 100 && (adapter.isBusy() || adapter.isRunning()); i++) {
@@ -158,6 +166,11 @@
       await new Promise(r => setTimeout(r, 100));
     }
     // 기다리는 사이 연결이 끊겼거나 나갔으면 방 작품으로 바꾸지 않는다
+    if (S.role !== 'guest' || joined || !conn || !conn.open) return;
+    // 큰 작품은 엔트리가 불러오는 동안 화면이 한동안 멈춘다 — 멈추기 전에 알려 두고 한 번 그릴 틈을 준다
+    lastJoinProgress = Date.now();
+    ui.set({ joinText: '방 작품을 화면에 넣는 중… 작품이 크면 화면이 잠시 멈춰요' });
+    await new Promise(r => setTimeout(r, 80));
     if (S.role !== 'guest' || joined || !conn || !conn.open) return;
     client = makeClient(S.cid);
     try {
@@ -170,6 +183,7 @@
     }
     joined = true;
     joinTimes.loaded = Date.now();
+    ui.set({ joinText: null });
     S.mode = 'room'; S.link = 'up';
     render();
     ui.toast('방에 들어왔어요. 이제 같이 고칠 수 있어요.');
@@ -279,13 +293,17 @@
       resetAll();
       return;
     }
-    // 30초 안에 방장이 답하지 않으면 그만둔다
-    setTimeout(() => { if (S.role === 'guest' && !joined && S.mode === 'connecting') { ui.toast('방장이 답하지 않아요. 방장 화면이 열려 있는지 확인해 주세요.', 'warn', 7000); resetAll(); } }, 30000);
+    // 큰 작품은 받는 데 오래 걸리므로, 30초 동안 아무것도 안 올 때만 그만둔다
+    lastJoinProgress = Date.now();
+    const watch = setInterval(() => {
+      if (S.role !== 'guest' || joined || S.mode !== 'connecting') { clearInterval(watch); return; }
+      if (Date.now() - lastJoinProgress > 30000) { clearInterval(watch); ui.toast('방장이 답하지 않아요. 방장 화면이 열려 있는지 확인해 주세요.', 'warn', 7000); resetAll(); }
+    }, 2000);
   }
 
   async function connectGuest() {
     const handle = guestHandle;
-    const c = await handle.connect({ onMessage: onServerMsg, onClose: () => { if (conn === c) onGuestDrop(); } });
+    const c = await handle.connect({ onMessage: onServerMsg, onClose: () => { if (conn === c) onGuestDrop(); }, onProgress: onJoinProgress });
     if (handle !== guestHandle || leaving) { c.close(); return; }
     conn = c;
     if (!joined) joinTimes.connected = Date.now();
@@ -332,6 +350,7 @@
     server = null; client = null; joined = false;
     Object.assign(S, { mode: 'idle', role: null, code: null, myId: null, members: [], link: 'up' });
     pauseReason = null; clearTimeout(extT);
+    ui.set({ joinText: null });
     lastWhere = '';
     ui.banner(null);
     render();

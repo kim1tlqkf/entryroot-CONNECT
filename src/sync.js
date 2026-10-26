@@ -8,7 +8,8 @@
 })(typeof self !== 'undefined' ? self : this, function (M) {
   'use strict';
 
-  const PROTOCOL = 1;
+  // 조각 모양이 바뀌면 올린다(서로 다른 판끼리 섞이면 계속 다르게 보임)
+  const PROTOCOL = 2;
   const COLORS = ['#e5484d', '#2e6ff2', '#30a46c', '#f5a524', '#8e4ec6', '#0091ff', '#e93d82', '#12a594', '#d6409f', '#3e63dd'];
   const nn = v => (v === undefined ? null : v);
 
@@ -162,7 +163,7 @@
       const units = msg.units || {};
       if (fresh) {
         this.base.clear(); this.seen.clear(); this.server.clear(); this.inflight = null;
-        this.adapter.loadAll(units);
+        this.adapter.loadAll(units, { fresh: true });
         const E = this.adapter.exportUnits() || {};
         for (const [k, v] of Object.entries(units)) { this.base.set(k, v); this.server.set(k, v); }
         for (const k of new Set([...Object.keys(units), ...Object.keys(E)])) this.seen.set(k, nn(E[k]));

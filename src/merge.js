@@ -68,6 +68,10 @@
     if (!f || typeof f.content !== 'string') return f;
     return { ...f, content: canonThreads(parseScript(f.content), off) };
   }
+  // 함수는 통째로만 합쳐서(부분 합치기 없음) 키 정렬이 필요 없다. 큰 작품은 함수가 수 MB라 빠른 JSON.stringify를 쓴다.
+  function funcUnit(f, off) {
+    return JSON.stringify(canonFunc(f, off));
+  }
   function decanonFunc(f, off) {
     if (!f || !Array.isArray(f.content)) return f;
     return { ...f, content: JSON.stringify(decanonThreads(f.content, off)) };
@@ -78,11 +82,24 @@
     return id != null ? String(id) : '#' + i;
   }
 
+  // 블록 묶음 배열 → code 조각. stable(배열)과 같은 글이지만, cache(Map: 묶음 원문 → 정리된 글)가 있으면 안 바뀐 묶음은 다시 정리하지 않는다.
+  function codeUnit(threads, off, cache) {
+    const canon = canonThreads(threads, off);
+    if (!cache) return stable(canon);
+    const parts = canon.map(th => {
+      const raw = JSON.stringify(th);
+      let st = cache.get(raw);
+      if (st === undefined) { st = stable(th); cache.set(raw, st); }
+      return st === undefined ? 'null' : st;
+    });
+    return '[' + parts.join(',') + ']';
+  }
+
   // 오브젝트 하나 → obj·code 조각. 큰 작품에서 바뀐 오브젝트만 다시 만들 수 있게 따로 둔다.
-  function objectUnits(item, off) {
+  function objectUnits(item, off, cache) {
     const rest = { ...item };
     delete rest.script;
-    return { obj: stable(rest), code: stable(canonThreads(parseScript(item.script), off)) };
+    return { obj: stable(rest), code: codeUnit(parseScript(item.script), off, cache) };
   }
 
   // offsetOf('obj:<id>' | 'func:<id>') → [dx, dy] 이 화면의 스크롤 몫
@@ -113,7 +130,7 @@
           u['obj:' + id] = ou.obj;
           u['code:' + id] = ou.code;
         } else if (pre === 'func') {
-          u['func:' + id] = stable(canonFunc(item, offsetOf && offsetOf('func:' + id)));
+          u['func:' + id] = funcUnit(item, offsetOf && offsetOf('func:' + id));
         } else if (pre === 'var') {
           u['var:' + id] = stable(canonVar(item));
         } else {
@@ -370,6 +387,6 @@
 
   return {
     LISTS, stable, projectToUnits, unitsToProject, mergeUnit, mergeKeyed, mergeOrder, mergeFields, mergeObject,
-    normalize, canonThreads, decanonThreads, threadKey, objectUnits, globalUnits,
+    normalize, canonThreads, decanonThreads, threadKey, objectUnits, globalUnits, funcUnit, decanonFunc, codeUnit,
   };
 });
