@@ -1,0 +1,4 @@
+tests/e2e/out/
+node_modules/
+*.ent
+*.log
