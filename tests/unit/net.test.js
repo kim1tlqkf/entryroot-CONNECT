@@ -33,7 +33,7 @@ test('큰 메시지는 나눠 보내고 받는 쪽에서 원래대로 합쳐진�
   const wa = Net.wrapConn(a.conn, { onMessage: () => {}, onClose: () => {}, log: () => {} });
   const wb = Net.wrapConn(b.conn, { onMessage: m => got.push(m), onClose: () => {}, log: () => {} });
   const big = { t: 'welcome', units: {} };
-  for (let i = 0; i < 400; i++) big.units['code:' + i] = JSON.stringify([[{ id: 'b' + i, type: 'text', params: ['안녕😀 블록 ' + i.toString().repeat(20)] }]]);
+  for (let i = 0; i < 4000; i++) big.units['code:' + i] = JSON.stringify([[{ id: 'b' + i, type: 'text', params: ['안녕😀 블록 ' + i.toString().repeat(20)] }]]);
   wa.send(big);
   wa.send({ t: 'upd', seq: 1 });
   assert.ok(a.sent.length > 3, '여러 조각으로 나뉘어야 함');

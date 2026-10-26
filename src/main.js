@@ -13,6 +13,7 @@
   let server = null, client = null, hostHandle = null, guestHandle = null, conn = null;
   let joined = false, leaving = false, retryUntil = 0, retryT = null;
   const conns = new Map();
+  let joinTimes = {}; // 참여 단계별 시각(느린 곳 찾기용)
 
   const ui = ErcUi.create({ onHost, onJoin, onLeave });
   const adapter = ErcEntry.create({ onLocalChange: kick, onExternalLoad, isOwnUi: n => ui.isOwn(n), log });
@@ -43,7 +44,14 @@
     clearTimeout(kickT);
     kickT = setTimeout(() => { kickT = null; if (client) { client.reconcile(); render(); } }, 300);
   }
-  setInterval(() => { if (client) { adapter.ensureHooks(); client.reconcile(); render(); } }, 1500);
+  // 평소엔 바뀐 오브젝트만 읽고, 명령을 거치지 않은 변경을 놓치지 않게 1.5초마다 오브젝트 3개씩 돌아가며 다시 본다
+  setInterval(() => {
+    if (!client) return;
+    adapter.ensureHooks();
+    adapter.scanSome(3);
+    client.reconcile();
+    render();
+  }, 1500);
 
   // ── 지금 보는 곳 알리기 ──
   let lastWhere = '';
@@ -129,6 +137,7 @@
     if (!msg || typeof msg !== 'object') return;
     switch (msg.t) {
       case 'welcome':
+        if (!joined) joinTimes.welcome = Date.now();
         S.myId = msg.you;
         if (S.role === 'guest' && !joined) { firstWelcome(msg); return; }
         if (client) client.onWelcome(msg, { fresh: false });
@@ -160,6 +169,7 @@
       return;
     }
     joined = true;
+    joinTimes.loaded = Date.now();
     S.mode = 'room'; S.link = 'up';
     render();
     ui.toast('방에 들어왔어요. 이제 같이 고칠 수 있어요.');
@@ -259,6 +269,7 @@
     adapter.ensureHooks();
     S.name = name; S.code = code; S.role = 'guest'; S.cid = randomId();
     S.mode = 'connecting'; render(); ui.set({ busyWhat: 'join' });
+    joinTimes = { start: Date.now() };
     joined = false; leaving = false;
     guestHandle = Net.guest(code, { log });
     try {
@@ -277,6 +288,7 @@
     const c = await handle.connect({ onMessage: onServerMsg, onClose: () => { if (conn === c) onGuestDrop(); } });
     if (handle !== guestHandle || leaving) { c.close(); return; }
     conn = c;
+    if (!joined) joinTimes.connected = Date.now();
     conn.send({ t: 'hello', v: Sync.PROTOCOL, cid: S.cid, name: S.name });
   }
 
@@ -366,7 +378,7 @@
 
   // 시험·문제 확인용(읽기 전용 요약)
   root.__entryHapjak = {
-    status: () => ({ mode: S.mode, role: S.role, code: S.code, myId: S.myId, link: S.link, members: S.members.map(m => ({ ...m })), client: client ? client.status() : null, sent: sentLog.slice() }),
+    status: () => ({ mode: S.mode, role: S.role, code: S.code, myId: S.myId, link: S.link, members: S.members.map(m => ({ ...m })), client: client ? client.status() : null, sent: sentLog.slice(), joinTimes: { ...joinTimes } }),
     exportUnits: () => adapter.exportUnits(),
     serverUnits: () => (server ? server.snapshot() : null),
   };

@@ -9,7 +9,67 @@
     const offsets = new Map();
     let pointerDown = false;
     let applying = false;
-    let hookedSm = null, hookedCce = null, protoHooked = false, loadHooked = false;
+    let hookedSm = null, hookedCce = null, hookedCmd = null, protoHooked = false, loadHooked = false;
+
+    // 큰 작품에서 매번 전체를 읽으면 화면이 멈춘다. 바뀐 오브젝트만 다시 읽고 나머지는 지난 결과를 쓴다.
+    const objCache = new Map();
+    let globalsCache = null;
+    const dirtyObjs = new Set();
+    let allDirty = true, globalsDirty = true;
+    const watchedCodes = new WeakSet();
+    const markAll = () => { allDirty = true; globalsDirty = true; };
+    // 명령을 거치지 않은 변경을 놓치지 않게 조금씩 다시 본다(한꺼번에 전체를 읽으면 큰 작품에서 화면이 멈춘다)
+    let scanAt = 0;
+    function scanSome(count) {
+      try {
+        const objs = E().container.getAllObjects();
+        if (!objs.length) return;
+        for (let i = 0; i < Math.min(count, objs.length); i++) dirtyObjs.add(String(objs[(scanAt + i) % objs.length].id));
+        scanAt = (scanAt + count) % objs.length;
+        if (scanAt < count) globalsDirty = true;
+      } catch (err) { log('scan', err); }
+    }
+
+    // 블록 화면 안에서만 바뀌는 명령 — 지금 블록 화면에 열린 코드만 다시 읽으면 된다
+    const BLOCK_CMDS = new Set(['addThread', 'destroyThread', 'destroyBlock', 'recoverBlock', 'insertBlock', 'separateBlock', 'moveBlock',
+      'cloneBlock', 'uncloneBlock', 'scrollBoard', 'setFieldValue', 'destroyBlockBelow', 'destroyThreads', 'addThreads', 'recoverBlockBelow',
+      'addThreadFromBlockMenu', 'insertBlockFromBlockMenu', 'moveBlockFromBlockMenu', 'separateBlockForDestroy', 'moveBlockForDestroy',
+      'insertBlockFromBlockMenuFollowSeparate', 'insertBlockFollowSeparate', 'separateBlockByCommand', 'createComment', 'removeComment',
+      'moveComment', 'toggleComment', 'cloneComment', 'uncloneComment', 'separateComment', 'connectComment', 'writeComment',
+      'showAllComment', 'hideAllComment']);
+    // 화면만 바꾸는 명령(작품 내용은 그대로)
+    const VIEW_ONLY_CMD = /^(selectBlockMenu|selectObject|containerSelectObject|sceneSelect|playgroundChangeViewMode|toggleRun|toggleStop|dismissModal|variableContainerSelectFilter|objectEditButtonClick|addObjectButtonClick)$|Click|Cancel$/;
+    let cmdNames = null;
+    function cmdName(type) {
+      if (typeof type === 'string') return type;
+      if (!cmdNames) {
+        cmdNames = new Map();
+        const CT = (E().STATIC && E().STATIC.COMMAND_TYPES) || {};
+        for (const k of Object.keys(CT)) if (typeof CT[k] === 'number') cmdNames.set(CT[k], k);
+      }
+      return cmdNames.get(type) || null;
+    }
+    function markBoard() {
+      const k = boardKey();
+      if (k && k.startsWith('obj:')) dirtyObjs.add(k.slice(4));
+      else { globalsDirty = true; if (!k) allDirty = true; }
+    }
+    function onCommand(type, args) {
+      const name = cmdName(type);
+      if (!name) { markAll(); return; }
+      if (BLOCK_CMDS.has(name)) { markBoard(); return; }
+      if (VIEW_ONLY_CMD.test(name)) return;
+      const a0 = Array.isArray(args) ? args[0] : undefined;
+      if ((typeof a0 === 'string' || typeof a0 === 'number') && getObj(a0)) { dirtyObjs.add(String(a0)); globalsDirty = true; return; }
+      markAll();
+    }
+    function watchCode(o) {
+      const c = o.script;
+      if (!c || !c.changeEvent || typeof c.changeEvent.attach !== 'function' || watchedCodes.has(c)) return;
+      watchedCodes.add(c);
+      const id = String(o.id);
+      c.changeEvent.attach(null, () => { dirtyObjs.add(id); });
+    }
 
     function ready() {
       try {
@@ -76,8 +136,14 @@
         hookedSm = sm;
       }
       if (hookedCce !== e.creationChangedEvent && e.creationChangedEvent) {
-        e.creationChangedEvent.attach(null, () => { if (!applying) onLocalChange(); });
+        e.creationChangedEvent.attach(null, () => { if (!applying) { markBoard(); onLocalChange(); } });
         hookedCce = e.creationChangedEvent;
+      }
+      // 명령(되돌리기 포함)마다 무엇이 바뀌었는지 기록한다
+      if (hookedCmd !== e.commander && e.commander && e.commander.doEvent && typeof e.commander.doEvent.attach === 'function') {
+        e.commander.doEvent.attach(null, (type, args) => { try { onCommand(type, args); } catch (err) { markAll(); log('command', err); } });
+        hookedCmd = e.commander;
+        markAll();
       }
       return true;
     }
@@ -109,13 +175,62 @@
       }
     }
 
+    // 오브젝트를 뺀 나머지(장면·변수·함수·표·설정)는 엔트리의 같은 내보내기로 읽되, 오브젝트 직렬화만 건너뛴다
+    function globalsViaExport() {
+      const c = E().container;
+      const own = Object.prototype.hasOwnProperty.call(c, 'toJSON');
+      const prev = c.toJSON;
+      c.toJSON = () => [{}];
+      try { return E().exportProject(); } finally { if (own) c.toJSON = prev; else delete c.toJSON; }
+    }
+
     function exportUnits() {
       if (!canRead()) return null;
-      let p;
       try { flushLazyPositions(); } catch (err) { log('flush positions', err); }
-      try { p = E().exportProject(); } catch (err) { log('export', err); return null; }
-      if (!p || !Array.isArray(p.objects)) return null;
-      return M.projectToUnits(p, k => offsets.get(k));
+      const e = E();
+      const units = {};
+      const ids = [];
+      const seen = new Set();
+      try {
+        const objs = e.container.getAllObjects();
+        // 엔트리 내보내기도 오브젝트가 하나도 없으면 실패로 돌려준다(비워진 화면을 "모두 지움"으로 보내지 않게)
+        if (!objs || !objs.length) return null;
+        const full = allDirty;
+        for (const o of objs) {
+          const id = String(o.id);
+          if (seen.has(id)) continue;
+          seen.add(id); ids.push(id);
+          watchCode(o);
+          const off = offsets.get('obj:' + id);
+          const offKey = off ? off[0] + ',' + off[1] : '0,0';
+          let c = objCache.get(id);
+          if (full || !c || dirtyObjs.has(id) || c.offKey !== offKey) {
+            const j = o.toJSON();
+            const raw = JSON.stringify(j);
+            if (!c || c.raw !== raw || c.offKey !== offKey) {
+              const u = M.objectUnits(j, off);
+              c = { raw, offKey, obj: u.obj, code: u.code };
+              objCache.set(id, c);
+            }
+          }
+          units['obj:' + id] = c.obj;
+          units['code:' + id] = c.code;
+        }
+        for (const id of [...objCache.keys()]) if (!seen.has(id)) objCache.delete(id);
+        if (full || globalsDirty || !globalsCache) {
+          const g = globalsViaExport();
+          if (!g) return null;
+          delete g.objects; delete g.interface;
+          const funcOff = [...offsets].filter(([k]) => k.startsWith('func:')).map(([k, v]) => k + '=' + v).join(';');
+          const raw = JSON.stringify(g) + '|' + funcOff;
+          if (!globalsCache || globalsCache.raw !== raw) globalsCache = { raw, units: M.globalUnits(g, k => offsets.get(k)) };
+        }
+      } catch (err) { log('export', err); return null; }
+      Object.assign(units, globalsCache.units);
+      units.objOrder = M.stable(ids);
+      dirtyObjs.clear();
+      allDirty = false; globalsDirty = false;
+      return units;
     }
 
     const getObj = id => { try { return E().container.getObject(id) || null; } catch { return null; } };
@@ -220,6 +335,7 @@
       try { if (old && old.clearExecutors) old.clearExecutors(); } catch { /* 옛 코드 정리는 실패해도 됨 */ }
       // 실행 취소가 옛 블록 자리(순서 번호)를 가리켜 남의 블록을 지울 수 있어, 이 오브젝트를 건드린 기록이 있으면 비운다
       dropUndoIfTouches('obj:' + id, onBoard);
+      dirtyObjs.add(id);
     }
 
     function applyObj(k, v, oldStr) {
@@ -234,6 +350,7 @@
       if (o.updateCoordinateView) o.updateCoordinateView();
       if (o.updateRotationView) o.updateRotationView();
       if (E().stage && E().stage.updateObject) E().stage.updateObject();
+      dirtyObjs.add(id);
     }
 
     // 글상자 크기처럼 컴퓨터마다 다르게 계산되는 값은 비교에서 뺀다
@@ -262,26 +379,31 @@
       } catch (err) { log('restoreView', err); }
     }
 
-    const idLists = p => M.stable(['scenes', 'objects'].map(f => (Array.isArray(p && p[f]) ? p[f] : []).map(x => x && x.id)));
+    // 엔트리가 장면별로 오브젝트 순서를 다시 맞출 수 있어 순서가 아니라 빠진 것이 있는지만 본다
+    const idLists = p => M.stable(['scenes', 'objects'].map(f => (Array.isArray(p && p[f]) ? p[f] : []).map(x => x && String(x.id)).sort()));
+    // 큰 작품에서 전체 내보내기는 느려서, 불러온 뒤 확인은 장면·오브젝트 id만 엔트리에서 바로 읽는다
+    const loadedIds = () => { const e = E(); return M.stable([e.scene.getScenes().map(s => String(s.id)).sort(), e.container.getAllObjects().map(o => String(o.id)).sort()]); };
 
     // 다시 불러오기가 실패하거나 일부만 들어오면 원래 작품으로 되돌리고 예외를 던진다.
     // 비워진·반쯤 찬 화면이 남으면 다음 확인 때 "내가 지운 것"으로 방 전체에 퍼지기 때문이다.
-    function loadUnits(units) {
+    // current: 지금 화면 조각(있으면 되돌릴 작품을 다시 내보내지 않고 이걸로 만든다)
+    function loadUnits(units, current) {
       const e = E();
       const view = captureView();
       const pid = e.projectId;
       let prev = null;
-      try { prev = e.exportProject(); } catch (err) { log('되돌릴 작품을 못 읽음', err); }
+      try { prev = current ? M.unitsToProject(current, k => offsets.get(k)) : e.exportProject(); } catch (err) { log('되돌릴 작품을 못 읽음', err); }
       const project = M.unitsToProject(units, k => offsets.get(k));
       if (pid) project._id = pid;
       const want = idLists(project);
       const load = p => { e.clearProject(); e.loadProject(p); };
       let failure = null;
+      markAll();
       applying = true;
       try {
         try {
           load(project);
-          if (idLists(e.exportProject()) !== want) failure = new Error('작품이 일부만 불러와짐');
+          if (loadedIds() !== want) failure = new Error('작품이 일부만 불러와짐');
         } catch (err) { failure = err; }
         if (failure && prev) {
           if (pid) prev._id = pid;
@@ -315,7 +437,7 @@
       const units = {};
       for (const [k, v] of Object.entries(current)) if (v != null) units[k] = v;
       for (const [k, v] of Object.entries(toApply)) { if (v == null) delete units[k]; else units[k] = v; }
-      loadUnits(units);
+      loadUnits(units, current);
       return true;
     }
 
@@ -335,7 +457,7 @@
 
     return {
       ready, ensureHooks, exportUnits, isSafe, apply, loadAll: loadUnits, where, objectName, isDefaultProject,
-      isRunning, stopRunning, isBusy: () => pointerDown || applying,
+      isRunning, stopRunning, isBusy: () => pointerDown || applying, markAllDirty: markAll, scanSome,
       _offsets: offsets,
     };
   }

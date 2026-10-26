@@ -163,8 +163,8 @@ const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes
     await A.waitFor(`Entry.container.getObject(${JSON.stringify(objId)}).name === '바뀐이름'`, 10000, 'A 이름 반영');
     check('오브젝트 이름이 다시 불러오기 없이 반영', await A.evalJs(`Entry.container.getObject(${JSON.stringify(objId)}).__e2eMark === 1`));
 
-    // ── 변수 추가(명령을 거치지 않는 경로도 주기 점검으로 잡히는지) ──
-    await A.evalJs(`Entry.variableContainer.addVariable({ id: 'e2eVar', name: '점수e2e', variableType: 'variable', value: 5, visible: true }); true`);
+    // ── 변수 추가(엔트리 화면의 변수 추가와 같은 명령) ──
+    await A.evalJs(`Entry.do('variableContainerAddVariable', new Entry.Variable({ id: 'e2eVar', name: '점수e2e', variableType: 'variable', value: 5, visible: true })); true`);
     await B.waitFor(`!!Entry.variableContainer.getVariable('e2eVar')`, 15000, 'B에 변수');
     check('방장이 만든 변수가 참가자에게 생김', true);
     await converged(A, B, '변수 추가 뒤 같은 작품');

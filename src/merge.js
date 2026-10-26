@@ -78,8 +78,20 @@
     return id != null ? String(id) : '#' + i;
   }
 
+  // 오브젝트 하나 → obj·code 조각. 큰 작품에서 바뀐 오브젝트만 다시 만들 수 있게 따로 둔다.
+  function objectUnits(item, off) {
+    const rest = { ...item };
+    delete rest.script;
+    return { obj: stable(rest), code: stable(canonThreads(parseScript(item.script), off)) };
+  }
+
   // offsetOf('obj:<id>' | 'func:<id>') → [dx, dy] 이 화면의 스크롤 몫
   function projectToUnits(p, offsetOf) {
+    return globalUnits(p, offsetOf, true);
+  }
+
+  // withObjects=false면 오브젝트(obj·code·objOrder)를 빼고 나머지만 만든다
+  function globalUnits(p, offsetOf, withObjects = false) {
     const u = {};
     const meta = {};
     for (const k of Object.keys(p || {})) {
@@ -88,6 +100,7 @@
     }
     u.meta = stable(meta);
     for (const [field, pre, orderKey] of LISTS) {
+      if (pre === 'obj' && !withObjects) continue;
       const arr = Array.isArray(p && p[field]) ? p[field] : [];
       const ids = [];
       arr.forEach((item, i) => {
@@ -96,10 +109,9 @@
         if (u[pre + ':' + id] !== undefined) return;
         ids.push(id);
         if (pre === 'obj') {
-          const rest = { ...item };
-          delete rest.script;
-          u['obj:' + id] = stable(rest);
-          u['code:' + id] = stable(canonThreads(parseScript(item.script), offsetOf && offsetOf('obj:' + id)));
+          const ou = objectUnits(item, offsetOf && offsetOf('obj:' + id));
+          u['obj:' + id] = ou.obj;
+          u['code:' + id] = ou.code;
         } else if (pre === 'func') {
           u['func:' + id] = stable(canonFunc(item, offsetOf && offsetOf('func:' + id)));
         } else if (pre === 'var') {
@@ -358,6 +370,6 @@
 
   return {
     LISTS, stable, projectToUnits, unitsToProject, mergeUnit, mergeKeyed, mergeOrder, mergeFields, mergeObject,
-    normalize, canonThreads, decanonThreads, threadKey,
+    normalize, canonThreads, decanonThreads, threadKey, objectUnits, globalUnits,
   };
 });
