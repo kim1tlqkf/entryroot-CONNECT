@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "엔트리 실시간 합작",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "엔트리 작품 만들기 화면에서 친구와 같은 작품을 실시간으로 함께 고칩니다(브라우저끼리 직접 연결).",
   "icons": { "16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png", "128": "icons/128.png" },
   "content_scripts": [
