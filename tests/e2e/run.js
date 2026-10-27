@@ -3,51 +3,15 @@
 // 엔트리 서버에 저장하지 않는다(로그인 없음, 저장 버튼을 누르지 않음).
 const fs = require('fs'), path = require('path');
 const { launch, openEntry, sleep } = require('./chrome');
+const { checker, uiClick, openPanel, converged, hasBlock } = require('./room');
 
 const ext = path.resolve(__dirname, '..', '..');
+const VERSION = require(path.join(ext, 'manifest.json')).version;
 const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 const out = path.join(__dirname, 'out', stamp);
 fs.mkdirSync(out, { recursive: true });
 
-const results = [];
-const check = (name, ok, detail = '') => { results.push({ name, ok: !!ok, detail }); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); };
-
-const uiFind = (sel, text, nth = 0) => `(() => {
-  const r = document.getElementById('entry-hapjak-root').shadowRoot;
-  const els = [...r.querySelectorAll(${JSON.stringify(sel)})].filter(e => ${text ? `e.textContent.includes(${JSON.stringify(text)})` : 'true'} && e.getBoundingClientRect().width > 0);
-  const e = els[${nth}]; if (!e) return null; const b = e.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 };
-})()`;
-async function uiClick(c, sel, text, nth = 0) {
-  const p = await c.waitFor(uiFind(sel, text, nth), 10000, `화면 요소 ${sel} ${text || ''}`);
-  await c.click(p.x, p.y);
-  await sleep(150);
-}
-async function openPanel(c) {
-  const hidden = await c.evalJs(`document.getElementById('entry-hapjak-root').shadowRoot.querySelector('.panel').hidden`);
-  if (hidden) await uiClick(c, '.fab');
-}
-
-// 글상자 폭처럼 컴퓨터마다 다를 수 있는 값을 빼고 비교
-const STRIP = `(u => { const o = {}; for (const [k, v] of Object.entries(u || {})) { if (v == null) continue; if (k.startsWith('obj:')) { const x = JSON.parse(v); if (x.objectType === 'textBox' && x.entity) { delete x.entity.width; delete x.entity.height; } o[k] = JSON.stringify(x); } else o[k] = v; } return o; })`;
-async function units(c, server = false) { return c.evalJs(`${STRIP}(__entryHapjak.${server ? 'serverUnits' : 'exportUnits'}())`); }
-async function converged(A, B, label, ms = 20000) {
-  const t0 = Date.now();
-  let diff = [];
-  while (Date.now() - t0 < ms) {
-    const [ua, ub, us] = await Promise.all([units(A), units(B), units(A, true)]);
-    diff = [];
-    if (ua && ub && us) {
-      for (const k of new Set([...Object.keys(ua), ...Object.keys(ub), ...Object.keys(us)])) {
-        if (ua[k] !== us[k] || ub[k] !== us[k]) diff.push(k);
-      }
-      if (!diff.length) { check(label, true, `${Math.round((Date.now() - t0) / 100) / 10}초`); return true; }
-    }
-    await sleep(300);
-  }
-  check(label, false, '다른 조각: ' + diff.slice(0, 8).join(', '));
-  return false;
-}
-const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes(${JSON.stringify(id)})`;
+const { results, check } = checker();
 
 (async () => {
   let A, B;
@@ -76,7 +40,7 @@ const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes
     await B.waitFor(`__entryHapjak.status().mode === 'room'`, 45000, '참가자 방 입장');
     await A.waitFor(`__entryHapjak.status().members.length === 2`, 10000, '방장이 참가자를 봄');
     check('참가자가 실제 P2P로 방에 들어옴', true);
-    await converged(A, B, '들어온 직후 두 사람 작품이 같음');
+    await converged(A, B, '들어온 직후 두 사람 작품이 같음', check);
     await A.screenshot(path.join(out, '1-A-room.png'));
     await B.screenshot(path.join(out, '1-B-room.png'));
 
@@ -100,7 +64,7 @@ const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes
     ]);
     await Promise.all([A.waitFor(hasBlock('e2eConB'), 15000, 'A에 B 동시 블록'), B.waitFor(hasBlock('e2eConA'), 15000, 'B에 A 동시 블록')]);
     check('동시에 같은 오브젝트에 다른 묶음을 더해도 둘 다 남음', (await A.evalJs(hasBlock('e2eConA'))) && (await B.evalJs(hasBlock('e2eConB'))));
-    await converged(A, B, '동시 편집 뒤 같은 작품');
+    await converged(A, B, '동시 편집 뒤 같은 작품', check);
 
     // ── 큰 묶음(여러 조각으로 나눠 보내짐) ──
     const bigLen = await A.evalJs(`(() => {
@@ -111,7 +75,7 @@ const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes
     })()`);
     await B.waitFor(hasBlock('big249'), 20000, 'B가 큰 묶음을 받음');
     check('큰 묶음(나눠 보내기)이 참가자에게 그대로 감', true, `코드 ${bigLen}자`);
-    await converged(A, B, '큰 묶음 뒤 같은 작품');
+    await converged(A, B, '큰 묶음 뒤 같은 작품', check);
 
     // ── 스크롤만 하면 보내지 않음 ──
     const seq0 = await A.evalJs('__entryHapjak.status().client.seq');
@@ -156,7 +120,7 @@ const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes
     const bSel1 = await B.evalJs('Entry.playground.object && Entry.playground.object.id');
     check('새 오브젝트가 참가자에게 생기고, 참가자가 보던 오브젝트는 그대로', bSel0 === bSel1, `${bSel0} → ${bSel1}`);
     check('작품을 다시 불러와도 내 작품 번호(저장 위치)는 그대로', (await B.evalJs('Entry.projectId')) === 'e2eFakeProject');
-    await converged(A, B, '오브젝트 추가 뒤 같은 작품');
+    await converged(A, B, '오브젝트 추가 뒤 같은 작품', check);
 
     // ── 오브젝트 이름 바꾸기: 부분 반영 ──
     await B.evalJs(`Entry.do('objectNameEdit', ${JSON.stringify(objId)}, '바뀐이름'); true`);
@@ -170,13 +134,13 @@ const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes
     await A.evalJs(`(() => { const o = Entry.container.getObject(${JSON.stringify(objId)}); const sel = o.selectedPicture; Entry.container.setPicture({ ...Entry.getPicturesJSON([sel])[0], objectId: o.id, name: '바뀐모양이름' }); o.selectPicture(sel.id); Entry.do('objectUpdatePosY', o.id, 33); return true; })()`);
     await B.waitFor(`Entry.container.getObject(${JSON.stringify(objId)}).pictures.some(p => p.name === '바뀐모양이름')`, 20000, 'B 모양 이름');
     check('모양 추가·고른 모양 바꾸기가 다시 불러오기 없이 반영', (await B.evalJs(`Entry.container.getObject(${JSON.stringify(objId)}).__e2eMark === 2`)) && (await B.evalJs(`!!__entryHapjak.exportUnits()`)));
-    await converged(A, B, '모양 바꾼 뒤 같은 작품');
+    await converged(A, B, '모양 바꾼 뒤 같은 작품', check);
 
     // ── 변수 추가(엔트리 화면의 변수 추가와 같은 명령) ──
     await A.evalJs(`Entry.do('variableContainerAddVariable', new Entry.Variable({ id: 'e2eVar', name: '점수e2e', variableType: 'variable', value: 5, visible: true })); true`);
     await B.waitFor(`!!Entry.variableContainer.getVariable('e2eVar')`, 15000, 'B에 변수');
     check('방장이 만든 변수가 참가자에게 생김', true);
-    await converged(A, B, '변수 추가 뒤 같은 작품');
+    await converged(A, B, '변수 추가 뒤 같은 작품', check);
 
     // ── 실행 중엔 미뤘다가 멈추면 반영 ──
     await B.evalJs(`Entry.engine.toggleRun(); true`);
@@ -207,7 +171,7 @@ const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes
     await sleep(800);
     const after = await A.evalJs(`Entry.playground.object.script.getThreads().length`);
     check('방장이 실제 마우스로 블록을 끌어다 놓음', after === before + 1, `${before}→${after} (${geo.type})`);
-    await converged(A, B, '마우스로 놓은 블록이 참가자에게도 같음');
+    await converged(A, B, '마우스로 놓은 블록이 참가자에게도 같음', check);
 
     // ── 남의 변경이 내 화면 오브젝트에 들어온 뒤 Ctrl+Z가 남의 블록을 지우지 않음 ──
     await A.evalJs(`Entry.do('addThread', [{ id: 'e2eUndoA', type: 'when_run_button_click', x: 900, y: 300, params: [null] }]); true`);
@@ -219,7 +183,7 @@ const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes
     await A.key('z', 'KeyZ', 90, 2);
     await sleep(1500);
     check('되돌리기(Ctrl+Z)가 남이 더한 블록을 지우지 않음', await A.evalJs(hasBlock('e2eUndoB')), `되돌리기 기록 ${undoBefore}→${undoAfter}`);
-    await converged(A, B, '되돌리기 뒤에도 같은 작품');
+    await converged(A, B, '되돌리기 뒤에도 같은 작품', check);
 
     // ── 참가자가 다른 작품을 불러오면 멈추고, 되돌리기를 고르면 방 작품으로 돌아옴 ──
     await B.evalJs(`Entry.clearProject(); Entry.loadProject(); true`);
@@ -228,7 +192,7 @@ const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes
     await sleep(2500);
     check('다른 작품을 불러오면 방으로 보내지 않고 멈춤', (await A.evalJs('__entryHapjak.status().client.seq')) === seqPaused && (await A.evalJs(hasBlock('e2eUndoB'))));
     await uiClick(B, '.modal button.main', '방 작품으로 되돌리기');
-    await converged(A, B, '"방 작품으로 되돌리기" 뒤 같은 작품');
+    await converged(A, B, '"방 작품으로 되돌리기" 뒤 같은 작품', check);
 
     // ── 엔트리가 같은 작품을 비웠다가 조금 뒤 다시 불러와도(저장 뒤 다시 열기 같은 경우) 아무것도 보내지 않고 이어 감 ──
     const seqReload = await A.evalJs('__entryHapjak.status().client.seq');
@@ -247,7 +211,7 @@ const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes
     check('참가자 불러오기가 실패해도 방 작품은 그대로이고 참가자 화면은 바로 전 상태', afterFail.serverObjs === afterFail.aObjs && afterFail.aObjs === bObjsBefore + 1 && afterFail.bObjs === bObjsBefore, JSON.stringify(afterFail));
     await uiClick(B, '.modal button.main', '방 작품 다시 받기');
     await B.waitFor(`!!Entry.container.getObject('e2eObj3')`, 10000, 'B 다시 받기');
-    await converged(A, B, '"방 작품 다시 받기" 뒤 같은 작품');
+    await converged(A, B, '"방 작품 다시 받기" 뒤 같은 작품', check);
 
     // ── 블록 값 고르기 목록이 열려 있는 동안은 그 화면 블록을 바꾸지 않음 ──
     await A.evalJs(`Entry.container.selectObject(${JSON.stringify(objId)}); Entry.playground.changeViewMode('code'); true`);
@@ -271,7 +235,7 @@ const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes
       await A.click(kb.l + kb.w + 300, kb.t + 250);
       await A.waitFor(`!!Entry.getMainWS().board.code.findById('e2eWidget')`, 10000, '목록 닫은 뒤 반영');
       check('블록 값 목록이 열린 동안 반영을 미루고, 닫으면 반영', !whileOpen);
-      await converged(A, B, '값 목록 닫은 뒤 같은 작품');
+      await converged(A, B, '값 목록 닫은 뒤 같은 작품', check);
     }
 
     // ── 오른쪽 클릭 메뉴가 열려 있는 동안도 같음 ──
@@ -288,7 +252,7 @@ const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes
       await A.click(rc.x + 500, rc.y + 400);
       await A.waitFor(`!!Entry.getMainWS().board.code.findById('e2eCtx')`, 10000, '메뉴 닫은 뒤 반영');
       check('오른쪽 클릭 메뉴가 열린 동안 반영을 미루고, 닫으면 반영', !whileMenu);
-      await converged(A, B, '메뉴 닫은 뒤 같은 작품');
+      await converged(A, B, '메뉴 닫은 뒤 같은 작품', check);
     }
 
     // ── 방장 쪽이 1분 넘게 멈춤(인터넷 끊김 흉내) → 참가자가 다시 붙고, 그동안 고친 게 살아남음 ──
@@ -305,7 +269,7 @@ const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes
     await B.waitFor(`__entryHapjak.status().link === 'up' && __entryHapjak.status().mode === 'room'`, 90000, 'B 다시 연결');
     await A.waitFor(hasBlock('e2eOffline'), 20000, 'A가 끊긴 동안의 편집을 받음');
     check('끊겼다 다시 붙으면 끊긴 동안 고친 것이 방장에게 감', true, `끊김 표시: ${offlineUi}`);
-    await converged(A, B, '다시 연결 뒤 같은 작품', 30000);
+    await converged(A, B, '다시 연결 뒤 같은 작품', check, 30000);
 
     await A.screenshot(path.join(out, '2-A-after.png'));
     await B.screenshot(path.join(out, '2-B-after.png'));
@@ -315,7 +279,7 @@ const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes
     await uiClick(B, '.foot button', '문제 기록 복사');
     const diag = await B.evalJs('__entryHapjak.diagnostics()');
     const diagToast = await B.evalJs(`[...document.getElementById('entry-hapjak-root').shadowRoot.querySelectorAll('.toast')].map(t => t.textContent).join(' | ')`);
-    check('문제 기록 복사가 판 번호·상태·최근 기록을 담고 알림을 띄움', /v0\.2\.0/.test(diag) && /상태 room\/guest/.test(diag) && /최근 기록/.test(diag) && /복사/.test(diagToast), diagToast.slice(0, 80));
+    check('문제 기록 복사가 판 번호·상태·최근 기록을 담고 알림을 띄움', diag.includes('v' + VERSION) &&/상태 room\/guest/.test(diag) && /최근 기록/.test(diag) && /복사/.test(diagToast), diagToast.slice(0, 80));
     await uiClick(B, 'button.x');
 
     // ── 방장이 방 닫기 → 참가자 화면에 작품은 남고 방에서 나옴 ──

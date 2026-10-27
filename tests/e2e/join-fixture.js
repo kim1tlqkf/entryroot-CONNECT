@@ -92,6 +92,21 @@ const toasts = c => c.evalJs(`[...document.getElementById('entry-hapjak-root').s
         `!!Entry.container.getObject('opx9').pictures.find(p => p.id === 'fxPic1')`);
       await step('큰 오브젝트에 블록 추가', `(() => { Entry.container.selectObject('7y0y'); Entry.do('addThread', [{ id: 'fxBlk1', type: 'when_run_button_click', x: 1500, y: 1500, params: [null] }]); return true; })()`,
         `Entry.container.getObject('7y0y').script.stringify().includes('fxBlk1')`);
+      // 받는 쪽이 한 번 열었다가 다른 오브젝트로 옮긴 큰 오브젝트(그림 틀이 남은 코드)에 블록이 들어올 때, 그리고 그 오브젝트를 다시 열 때
+      await B.evalJs(`(() => { Entry.container.selectObject('7y0y'); Entry.playground.changeViewMode('code'); return true; })()`);
+      await sleep(4000);
+      await B.evalJs(`(() => { Entry.container.selectObject('opx9'); return true; })()`);
+      await sleep(2000);
+      // 화면에서 내려간 큰 오브젝트의 블록 데이터 좌표와 그림 좌표가 다른 묶음 수(다르면 좌표 맞추기가 데이터를 바꾼다)
+      out.hiddenPosDiff = await B.evalJs(`Entry.container.getObject('7y0y').script.getThreads().filter(t => { const b = t.getFirstBlock(); return b && b.view && (Math.abs(b.x - b.view.x) > 0.5 || Math.abs(b.y - b.view.y) > 0.5); }).length`);
+      await step('화면에 없는 큰 오브젝트에 블록 추가', `(() => { Entry.do('addThread', [{ id: 'fxBlk2', type: 'when_run_button_click', x: 1700, y: 1500, params: [null] }]); return true; })()`,
+        `Entry.container.getObject('7y0y').script.stringify().includes('fxBlk2')`);
+      out.edits['화면에 없는 큰 오브젝트에 블록 추가'].strayOnBoard = await B.evalJs(`(() => { const bc = Entry.getMainWS().board.code; let n = 0; for (const o of Entry.container.getAllObjects()) if (o.script !== bc) for (const t of o.script.getThreads()) if (t.view && t.view.svgGroup && t.view.svgGroup.isConnected) n++; return n; })()`);
+      await takeLT(B);
+      t0 = Date.now();
+      await B.evalJs(`(() => { Entry.container.selectObject('7y0y'); return true; })()`);
+      await sleep(1500);
+      out.reopenBigOnGuest = { ms: Date.now() - t0, lt: await takeLT(B), drawn: await B.evalJs(`(() => { const b = Entry.getMainWS().board.code.findById('fxBlk2'); return !!(b && b.view && b.view.svgGroup.isConnected); })()`) };
       // 마지막에 두 사람 작품이 같은지(오브젝트·함수·변수·신호 조각)
       await sleep(4000);
       const strip = `(u => { const o = {}; for (const [k, v] of Object.entries(u || {})) { if (v == null || /Order$/.test(k)) continue; if (k.startsWith('obj:')) { const x = JSON.parse(v); if (x.objectType === 'textBox' && x.entity) { delete x.entity.width; delete x.entity.height; } o[k] = JSON.stringify(x); } else o[k] = v; } return o; })`;
@@ -102,6 +117,7 @@ const toasts = c => c.evalJs(`[...document.getElementById('entry-hapjak-root').s
     out.error = String(e.message || e).slice(0, 500);
   } finally {
     clearInterval(watch);
+    out.diagB = await B.evalJs(`__entryHapjak.diagnostics().split('\\n').slice(-30)`).catch(e => String(e.message));
     out.consoleB = B.consoleLines.slice(-8);
     out.consoleA = A.consoleLines.slice(-8);
     console.log(JSON.stringify(out, null, 1));
