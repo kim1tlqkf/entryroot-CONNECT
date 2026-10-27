@@ -5,7 +5,7 @@
   root.__entryHapjakLoaded = true;
 
   const { ErcSync: Sync, ErcEntry, ErcNet: Net, ErcUi, ErcMerge: M } = root;
-  const VERSION = '0.2.0';
+  const VERSION = '0.2.1';
   // 안 될 때 사용자가 "문제 기록 복사"로 붙여 넣을 수 있게 최근 기록을 모아 둔다(작품 내용은 넣지 않음)
   const diagLog = [];
   const remember = line => { diagLog.push(new Date().toTimeString().slice(0, 8) + ' ' + line); if (diagLog.length > 80) diagLog.shift(); };
@@ -18,6 +18,7 @@
   const S = { mode: 'idle', role: null, code: null, myId: null, members: [], link: 'up', name: '' };
   let server = null, client = null, hostHandle = null, guestHandle = null, conn = null;
   let joined = false, leaving = false, retryUntil = 0, retryT = null;
+  let earlyUpd = [];
   const conns = new Map();
   let joinTimes = {}; // 참여 단계별 시각(느린 곳 찾기용)
 
@@ -147,12 +148,18 @@
       case 'welcome':
         if (!joined) joinTimes.welcome = Date.now();
         S.myId = msg.you;
+        // 다시 붙은 참가자의 위치는 방장이 모른다 — 다음 확인 때 다시 보낸다
+        lastWhere = '';
         if (S.role === 'guest' && !joined) { firstWelcome(msg); return; }
         if (client) client.onWelcome(msg, { fresh: false });
         S.link = 'up';
         render();
         return;
-      case 'upd': if (client) client.onUpd(msg); render(); return;
+      case 'upd':
+        if (client) client.onUpd(msg);
+        // 방 작품을 화면에 넣기 전에 온 변경은 모아 뒀다 넣는다 — 버리면 차례가 비어 방 작품 전체를 다시 받는다
+        else if (S.role === 'guest' && !joined && earlyUpd.length < 1000) earlyUpd.push(msg);
+        render(); return;
       case 'mem': S.members = Array.isArray(msg.members) ? msg.members : []; render(); return;
       case 'refuse': ui.toast(failText(msg.why), 'warn', 7000); resetAll(); return;
       case 'bye': ui.toast('방장이 방을 닫았어요. 작품은 내 화면에 그대로 있어요.', 'warn', 8000); resetAll(); return;
@@ -183,6 +190,7 @@
     client = makeClient(S.cid);
     try {
       client.onWelcome(msg, { fresh: true });
+      for (const m of earlyUpd.splice(0)) if (m.seq > msg.seq) client.onUpd(m);
     } catch (err) {
       log('load room project', err);
       ui.toast('방 작품을 불러오지 못했어요.', 'warn', 7000);
@@ -262,7 +270,10 @@
     if (server) { const bye = { t: 'bye' }; for (const c of conns.values()) { try { c.send(bye); } catch { /* 닫힘 */ } } }
     const cs = [...conns.values()];
     conns.clear();
-    setTimeout(() => { for (const c of cs) c.close(); if (hostHandle) { hostHandle.stop(); hostHandle = null; } }, 300);
+    // 닫기를 기다리는 300ms 사이에 새 방을 열 수 있어, 닫을 것은 지금 것으로 정해 둔다
+    const h = hostHandle;
+    hostHandle = null;
+    setTimeout(() => { for (const c of cs) c.close(); if (h) h.stop(); }, 300);
   }
 
   // ── 참여 ──
@@ -292,6 +303,7 @@
     S.name = name; S.code = code; S.role = 'guest'; S.cid = randomId();
     S.mode = 'connecting'; render(); ui.set({ busyWhat: 'join' });
     joinTimes = { start: Date.now() };
+    earlyUpd = [];
     joined = false; leaving = false;
     guestHandle = Net.guest(code, { log });
     try {
@@ -355,7 +367,7 @@
     else if (hostHandle) { hostHandle.stop(); hostHandle = null; }
     if (conn) { const c = conn; conn = null; c.close(); }
     if (guestHandle) { guestHandle.stop(); guestHandle = null; }
-    server = null; client = null; joined = false;
+    server = null; client = null; joined = false; earlyUpd = [];
     Object.assign(S, { mode: 'idle', role: null, code: null, myId: null, members: [], link: 'up' });
     pauseReason = null; clearTimeout(extT);
     ui.set({ joinText: null });

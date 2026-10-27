@@ -7,6 +7,8 @@
 
   function create({ onLocalChange, onExternalLoad, isOwnUi, log = () => {} }) {
     const offsets = new Map();
+    // 스크롤한(moveBy) 코드 — 블록 화면에서 내려간 뒤에도 좌표 맞추기(_updatePos)가 남아 있을 수 있다
+    const lazyCodes = new Set();
     let pointerDown = false;
     let applying = false;
     let hookedSm = null, hookedCce = null, hookedCmd = null, protoHooked = false, loadHooked = false;
@@ -134,6 +136,7 @@
             if (k && isFinite(dx) && isFinite(dy) && (dx || dy)) {
               const o = offsets.get(k) || [0, 0];
               offsets.set(k, [o[0] + (+dx || 0), o[1] + (+dy || 0)]);
+              lazyCodes.add(this);
             }
           } catch (err) { log('moveBy', err); }
           return orig.apply(this, arguments);
@@ -196,13 +199,18 @@
 
     // 블록 화면은 그림을 먼저 옮기고 작품 데이터 좌표는 200ms 뒤에 맞춘다(BlockView의 debounce된 _updatePos).
     // 스크롤 몫은 바로 더해지므로, 읽기 전에 그 맞추기를 미리 해 두지 않으면 스크롤만 해도 좌표가 바뀐 것으로 보인다.
+    // 스크롤하자마자 다른 오브젝트로 옮기면 그 코드는 블록 화면에 없으므로, 스크롤한 코드도 같이 맞춘다.
     function flushLazyPositions() {
       const ws = E().getMainWS();
-      const code = ws && ws.board && ws.board.code;
-      if (!code || typeof code.getThreads !== 'function') return;
-      for (const th of code.getThreads()) {
-        const b = th && typeof th.getFirstBlock === 'function' ? th.getFirstBlock() : null;
-        if (b && b.view && typeof b._updatePos === 'function') b._updatePos();
+      const codes = new Set(lazyCodes);
+      lazyCodes.clear();
+      if (ws && ws.board && ws.board.code) codes.add(ws.board.code);
+      for (const code of codes) {
+        if (!code || typeof code.getThreads !== 'function') continue;
+        for (const th of code.getThreads()) {
+          const b = th && typeof th.getFirstBlock === 'function' ? th.getFirstBlock() : null;
+          if (b && b.view && typeof b._updatePos === 'function') b._updatePos();
+        }
       }
     }
 
@@ -351,7 +359,7 @@
 
     // 큰 작품은 다시 불러오기에 수십 초가 걸려, 자주 바뀌는 것(블록·오브젝트 속성·모양·함수·변수·신호)은 그 부분만 넣는다
     function plan(toApply, current) {
-      const p = { full: false, code: [], obj: [], func: [], vars: [], msgs: false };
+      const p = { full: false, code: [], obj: [], func: [], vars: [], msgs: false, varOrder: false, funcOrder: false };
       for (const k of Object.keys(toApply)) {
         const v = toApply[k];
         if (k.startsWith('code:')) {
@@ -372,8 +380,10 @@
           p.vars.push(k);
         } else if (k.startsWith('msg:') || k === 'msgOrder') {
           p.msgs = true;
-        } else if (k === 'funcOrder' || k === 'varOrder') {
-          // 순서만: 함수·변수를 넣고 빼면서 같이 맞춘다
+        } else if (k === 'varOrder') {
+          p.varOrder = true;
+        } else if (k === 'funcOrder') {
+          p.funcOrder = true;
         } else p.full = true;
       }
       return p;
@@ -393,7 +403,19 @@
         if (mode === 'sound') return false;
         return true;
       }
-      if ((p.obj.length || p.vars.length || p.msgs || p.func.length) && focus) return false;
+      if ((p.obj.length || p.vars.length || p.msgs || p.func.length || p.varOrder || p.funcOrder) && focus) return false;
+      // 그림판에 저장 안 한 그림이 있거나 소리 화면을 보는 중이면, 그 오브젝트의 모양·소리 목록은 바꾸지 않고 미룬다
+      const pg = e.playground, cur = pg && pg.object;
+      if (cur && p.obj.includes('obj:' + cur.id)) {
+        const mode = viewMode();
+        const painterDirty = mode === 'picture' && pg.painter && pg.painter.file && pg.painter.file.modified;
+        if (painterDirty || mode === 'sound') {
+          const ov = JSON.parse(current['obj:' + cur.id]), nv = JSON.parse(toApply['obj:' + cur.id]);
+          const same = f => M.stable((ov.sprite || {})[f]) === M.stable((nv.sprite || {})[f]);
+          if (painterDirty && (!same('pictures') || ov.selectedPictureId !== nv.selectedPictureId)) return false;
+          if (mode === 'sound' && !same('sounds')) return false;
+        }
+      }
       const bk = boardKey();
       if (bk && p.code.includes('code:' + bk.slice(4)) && bk.startsWith('obj:')) {
         if (viewMode() !== 'code') return false;
@@ -438,6 +460,19 @@
       return true;
     }
 
+    // 엔트리는 한 번 열었던 코드(view가 남은 코드)에 묶음을 더하면 그 그림을 블록 화면에 지금 붙은 그림 묶음, 곧 지금 열린 오브젝트 것에 붙인다.
+    // 화면에 없는 그런 코드를 고치는 동안은 그 자리를 그 코드 자신의 그림 묶음으로 바꿔 둔다(엔트리 bindCodeView가 바꿔 끼우는 자리).
+    const VIEW_GROUPS = ['svgThreadGroup', 'svgBlockGroup', 'svgCommentGroup'];
+    function withOwnGroups(code, fn) {
+      const cv = code.view;
+      if (!cv) return fn();
+      const board = cv.board || code.board;
+      if (!board || VIEW_GROUPS.some(k => !cv[k])) return false;
+      const saved = VIEW_GROUPS.map(k => board[k]);
+      VIEW_GROUPS.forEach(k => { board[k] = cv[k]; });
+      try { return fn(); } finally { VIEW_GROUPS.forEach((k, i) => { board[k] = saved[i]; }); }
+    }
+
     function applyCode(k, v, oldStr) {
       const id = k.slice(5);
       const obj = getObj(id);
@@ -446,7 +481,8 @@
       const onBoard = !!(ws && ws.board && ws.board.code === obj.script);
       let patched = false;
       if (oldStr) {
-        try { patched = patchThreads(obj.script, JSON.parse(oldStr), JSON.parse(v), off, onBoard ? ws.board : null); } catch (err) { log('patch threads', err); patched = false; }
+        const run = () => patchThreads(obj.script, JSON.parse(oldStr), JSON.parse(v), off, onBoard ? ws.board : null);
+        try { patched = onBoard ? run() : withOwnGroups(obj.script, run); } catch (err) { log('patch threads', err); patched = false; }
       }
       if (!patched) {
         const threads = M.decanonThreads(JSON.parse(v), off);
@@ -539,9 +575,24 @@
           fns[id] = nf;
           if (old && old !== nf) { try { old.destroy(); } catch (err) { log('func destroy', err); } }
         }
+        // 이 함수 안에서 한 되돌리기 기록은 바뀌기 전 함수 블록을 가리킨다
+        dropUndoIfTouches('func:' + id);
         dirtyFuncs.add(id);
       }
       globalsDirty = true;
+      if (vc.updateList) vc.updateList();
+    }
+
+    // 함수 목록 순서: 엔트리는 functions_에 넣은 순서대로 보여 주고 내보낸다
+    function orderFuncs(orderStr) {
+      if (!orderStr) return;
+      const vc = E().variableContainer, fns = vc.functions_;
+      const order = JSON.parse(orderStr).map(String);
+      const pos = id => { const i = order.indexOf(id); return i < 0 ? 1e9 : i; };
+      const ids = Object.keys(fns);
+      const sorted = [...ids].sort((a, b) => pos(a) - pos(b));
+      if (sorted.join('\n') === ids.join('\n')) return;
+      for (const id of sorted) { const f = fns[id]; delete fns[id]; fns[id] = f; }
       if (vc.updateList) vc.updateList();
     }
 
@@ -653,7 +704,8 @@
         try {
           // 함수·변수·신호를 먼저(블록이 가리킬 대상), 그다음 오브젝트·블록
           if (p.func.length) applyFuncs(p.func, toApply);
-          if (p.vars.length) applyVars(p.vars, toApply, current);
+          if (p.func.length || p.funcOrder) orderFuncs(toApply.funcOrder != null ? toApply.funcOrder : current && current.funcOrder);
+          if (p.vars.length || p.varOrder) applyVars(p.vars, toApply, current);
           if (p.msgs) applyMsgs(toApply, current);
           for (const k of p.obj) applyObj(k, toApply[k], current[k]);
           for (const k of p.code) applyCode(k, toApply[k], current[k]);
