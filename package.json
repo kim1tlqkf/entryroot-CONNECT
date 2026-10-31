@@ -1,6 +1,6 @@
 {
   "name": "entry-hapjak",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "private": true,
   "license": "MIT",
   "description": "엔트리 작품 만들기 화면에서 친구와 같은 작품을 실시간으로 함께 고치는 크롬 확장",
