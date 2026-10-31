@@ -34,15 +34,17 @@ const MUTANTS = [
   ['scene-name', 'src/entry-adapter.js', 'p.scenes.push(k);', 'p.full = true;', '장면 이름만 바꿔도 작품을 통째로 다시 불러옴', 'surfaces'],
   ['dropped-notify', 'src/sync.js', 'if (dropped.length && this.hooks.onConflict) this.hooks.onConflict(dropped);', '', '남이 지운 오브젝트에 한 안 보낸 편집이 알림 없이 사라짐', 'unit'],
   ['rejoin', 'src/main.js', '\n  tryRejoin();', '', '참가자가 저장해 페이지가 새로 열리면 방에서 나가짐', 'rejoin'],
+  ['flow-lower', 'src/merge.js', "const portableThreads = (threads, source) => (typeof source !== 'string' || source.includes(FLOW_MARK) ? lowerFlow(threads) : threads);", 'const portableThreads = threads => threads;', '엔트리루트 전용 블록이 방에 그대로 가서 안 켠 사람이 못 들어오고 멈춤', 'merge'],
+  ['flow-scaled', 'src/merge.js', "typeof v.params[v.params.length - 1] === 'string'", "v.params[v.params.length - 1] === 'default'", '기본이 아닌 값을 고른 전용 블록이 방에 그대로 가서 안 켠 사람이 멈춤', 'merge'],
 ];
-// 시험 이름 → 그 시험을 돌리는 인자(e2e는 --ext 돌연변이 폴더를 붙인다. unit은 돌연변이 폴더 안에서 돈다)
+// 시험 이름 → 그 시험을 돌리는 인자(e2e는 --ext 돌연변이 폴더를 붙인다. 엔트리 없는 시험은 돌연변이 폴더 안에서 돈다)
 const TESTS = {
   derived: ['tests/e2e/derived.js'], run: ['tests/e2e/run.js'], multi: ['tests/e2e/multi-object.js'],
   surfaces: ['tests/e2e/surfaces.js', '--only', 'textbox,timerAnswer,reorder,python,scene'],
   rejoin: ['tests/e2e/surfaces.js', '--only', 'rejoin'],
-  unit: ['--test', 'tests/unit/sync.test.js'],
+  unit: ['--test', 'tests/unit/sync.test.js'], merge: ['--test', 'tests/unit/merge.test.js'],
 };
-const testRun = (test, dir) => (test === 'unit' ? { args: TESTS.unit, cwd: dir } : { args: [...TESTS[test], '--ext', dir], cwd: root });
+const testRun = (test, dir) => (TESTS[test][0] === '--test' ? { args: TESTS[test], cwd: dir } : { args: [...TESTS[test], '--ext', dir], cwd: root });
 
 const copyExt = dir => {
   for (const name of ['manifest.json']) fs.copyFileSync(path.join(root, name), path.join(dir, name));
