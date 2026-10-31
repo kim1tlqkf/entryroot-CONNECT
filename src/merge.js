@@ -95,9 +95,18 @@
     return '[' + parts.join(',') + ']';
   }
 
+  // 엔트리는 모양을 처음 그릴 때 그때의 오브젝트 크기를 모양 정보(dimension.scaleX/Y)에 적어 두기만 하고 다시 읽지 않는다.
+  // 명령 없이 늦게 붙어 사람마다 있고 없고가 갈리므로(남의 변경을 넣은 뒤 "방과 다름"으로 보임) 조각에 넣지 않는다
+  function canonPicture(pic) {
+    if (!pic || !pic.dimension || (pic.dimension.scaleX === undefined && pic.dimension.scaleY === undefined)) return pic;
+    const { scaleX, scaleY, ...dimension } = pic.dimension;
+    return { ...pic, dimension };
+  }
+
   // 오브젝트 하나 → obj·code 조각. 큰 작품에서 바뀐 오브젝트만 다시 만들 수 있게 따로 둔다.
   function objectUnits(item, off, cache) {
     const rest = { ...item };
+    if (rest.sprite && Array.isArray(rest.sprite.pictures)) rest.sprite = { ...rest.sprite, pictures: rest.sprite.pictures.map(canonPicture) };
     delete rest.script;
     return { obj: stable(rest), code: codeUnit(parseScript(item.script), off, cache) };
   }
@@ -387,6 +396,6 @@
 
   return {
     LISTS, stable, projectToUnits, unitsToProject, mergeUnit, mergeKeyed, mergeOrder, mergeFields, mergeObject,
-    normalize, canonThreads, decanonThreads, threadKey, objectUnits, globalUnits, funcUnit, decanonFunc, codeUnit,
+    normalize, canonThreads, decanonThreads, threadKey, objectUnits, globalUnits, funcUnit, decanonFunc, codeUnit, canonPicture,
   };
 });

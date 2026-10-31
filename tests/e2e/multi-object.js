@@ -5,7 +5,9 @@ const fs = require('fs'), path = require('path');
 const { launch, openEntry, sleep } = require('./chrome');
 const { checker, converged, openRoom } = require('./room');
 
-const ext = path.resolve(__dirname, '..', '..');
+// --ext 폴더: 이 폴더 대신 다른 확장 사본으로(돌연변이 측정 등)
+const extArg = process.argv.indexOf('--ext');
+const ext = path.resolve(extArg > 0 ? process.argv[extArg + 1] : path.resolve(__dirname, '..', '..'));
 const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 const out = path.join(__dirname, 'out', 'multi-' + stamp);
 fs.mkdirSync(out, { recursive: true });

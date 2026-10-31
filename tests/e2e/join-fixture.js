@@ -8,7 +8,9 @@ const PROFILE = process.argv.includes('--profile');
 if (!file) { console.error('작품 JSON 경로를 주세요'); process.exit(2); }
 // --also=<확장 폴더>: 사용자 크롬처럼 다른 확장도 같이 켠다(여러 번 줄 수 있음)
 const also = process.argv.filter(a => a.startsWith('--also=')).map(a => a.slice(7));
-const ext = [path.resolve(__dirname, '..', '..'), ...also];
+// --ext=<확장 폴더>: 이 폴더 대신 다른 사본(측정용으로 고친 것 등)을 쓴다
+const main = (process.argv.find(a => a.startsWith('--ext=')) || '').slice(6) || path.resolve(__dirname, '..', '..');
+const ext = [main, ...also];
 const uiFind = (sel, text, nth = 0) => `(() => { const r = document.getElementById('entry-hapjak-root').shadowRoot; const els = [...r.querySelectorAll(${JSON.stringify(sel)})].filter(e => ${text ? `e.textContent.includes(${JSON.stringify(text)})` : 'true'} && e.getBoundingClientRect().width > 0); const e = els[${nth}]; if (!e) return null; const b = e.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2 }; })()`;
 async function uiClick(c, sel, text, nth = 0) { const p = await c.waitFor(uiFind(sel, text, nth), 20000); await c.click(p.x, p.y); await sleep(150); }
 const LONGTASK = `(() => { window.__lt = []; try { new PerformanceObserver(l => { for (const e of l.getEntries()) window.__lt.push(Math.round(e.duration)); }).observe({ type: 'longtask' }); } catch (e) { window.__ltErr = String(e); } return true; })()`;
@@ -111,7 +113,12 @@ const toasts = c => c.evalJs(`[...document.getElementById('entry-hapjak-root').s
       await sleep(4000);
       const strip = `(u => { const o = {}; for (const [k, v] of Object.entries(u || {})) { if (v == null || /Order$/.test(k)) continue; if (k.startsWith('obj:')) { const x = JSON.parse(v); if (x.objectType === 'textBox' && x.entity) { delete x.entity.width; delete x.entity.height; } o[k] = JSON.stringify(x); } else o[k] = v; } return o; })`;
       const [ua, ub] = await Promise.all([A.evalJs(`${strip}(__entryHapjak.exportUnits())`), B.evalJs(`${strip}(__entryHapjak.exportUnits())`)]);
-      out.sameAfterEdits = ua && ub ? Object.keys({ ...ua, ...ub }).filter(k => ua[k] !== ub[k]).slice(0, 10) : 'export 실패';
+      // 블록에 붙은 메모 x·y는 각자 그려진 블록 폭에 따라 다를 수 있다(엔트리 Comment.updateParentPos) — 그것만 다른 조각은 따로 센다
+      const commentFree = s => JSON.stringify(JSON.parse(s), (key, val) => (key === 'comment' && val && typeof val === 'object' ? { ...val, x: 0, y: 0 } : val));
+      const diff = ua && ub ? Object.keys({ ...ua, ...ub }).filter(k => ua[k] !== ub[k]) : null;
+      const displayOnly = k => /^(code|func):/.test(k) && ua[k] != null && ub[k] != null && commentFree(ua[k]) === commentFree(ub[k]);
+      out.sameAfterEdits = diff ? diff.filter(k => !displayOnly(k)).slice(0, 10) : 'export 실패';
+      out.commentPosOnlyDiff = diff ? diff.filter(displayOnly) : null;
     }
   } catch (e) {
     out.error = String(e.message || e).slice(0, 500);

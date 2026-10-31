@@ -5,7 +5,7 @@
   root.__entryHapjakLoaded = true;
 
   const { ErcSync: Sync, ErcEntry, ErcNet: Net, ErcUi, ErcMerge: M } = root;
-  const VERSION = '0.2.1';
+  const VERSION = '0.2.3';
   // 안 될 때 사용자가 "문제 기록 복사"로 붙여 넣을 수 있게 최근 기록을 모아 둔다(작품 내용은 넣지 않음)
   const diagLog = [];
   const remember = line => { diagLog.push(new Date().toTimeString().slice(0, 8) + ' ' + line); if (diagLog.length > 80) diagLog.shift(); };
@@ -88,10 +88,9 @@
       adapter, id, send: sendToServer,
       hooks: {
         onConflict: keys => {
-          const names = [...new Set(keys.map(k => {
-            const id2 = k.includes(':') ? k.slice(k.indexOf(':') + 1) : '';
-            return (k.startsWith('code:') || k.startsWith('obj:')) ? adapter.objectName(id2) : null;
-          }).filter(Boolean))];
+          const ids = [...new Set(keys.filter(k => k.startsWith('code:') || k.startsWith('obj:')).map(k => k.slice(k.indexOf(':') + 1)))];
+          const names = ids.map(id2 => adapter.objectName(id2)).filter(Boolean);
+          if (ids.length && !names.length) { ui.toast('다른 사람이 지운 오브젝트에 한 내 변경은 반영되지 않았어요.', 'warn', 7000); return; }
           ui.toast(`${names.length ? `'${names.join("', '")}' ` : ''}같은 부분을 다른 사람이 먼저 고쳐서, 내 변경 일부가 반영되지 않았어요.`, 'warn', 7000);
         },
         onGap: () => sendToServer({ t: 'hello', v: Sync.PROTOCOL, cid: S.role === 'host' ? 'host' : S.cid, name: S.name, host: S.role === 'host' }),
@@ -132,10 +131,13 @@
     if (i == null || !client) return;
     if (i === 0) backToRoom(); else resetAll();
   }
-  async function askSuspicious({ gone, total }) {
+  async function askSuspicious({ gone, total, wiped }) {
+    const names = (wiped || []).map(k => adapter.objectName(k.slice(5))).filter(Boolean);
     const i = await askOnce({
-      title: '오브젝트가 한꺼번에 사라졌어요',
-      body: `오브젝트 ${total}개 중 ${gone || total}개가 한 번에 사라져서 방에 보내기 전에 멈췄어요.\n일부러 지운 게 아니면 방 작품으로 되돌리세요. 방에도 지우면 모두의 화면에서 지워집니다.`,
+      title: wiped ? '블록이 한꺼번에 모두 사라졌어요' : '오브젝트가 한꺼번에 사라졌어요',
+      body: wiped
+        ? `${names.length ? `'${names.join("', '")}'의 ` : ''}블록이 한 번에 모두 사라져서 방에 보내기 전에 멈췄어요.\n엔트리파이선 글을 블록으로 바꾸지 못하면 이렇게 될 수 있어요. 일부러 지운 게 아니면 방 작품으로 되돌리세요. 방에도 지우면 모두의 화면에서 지워집니다.`
+        : `오브젝트 ${total}개 중 ${gone || total}개가 한 번에 사라져서 방에 보내기 전에 멈췄어요.\n일부러 지운 게 아니면 방 작품으로 되돌리세요. 방에도 지우면 모두의 화면에서 지워집니다.`,
       buttons: [{ label: '방 작품으로 되돌리기', kind: 'main' }, { label: '방에도 지우기', kind: 'danger' }],
     });
     if (i == null || !client) return;
@@ -202,7 +204,7 @@
     ui.set({ joinText: null });
     S.mode = 'room'; S.link = 'up';
     render();
-    ui.toast('방에 들어왔어요. 이제 같이 고칠 수 있어요.');
+    ui.toast(rejoined ? '페이지가 새로 열려서 같은 방에 다시 들어왔어요.' : '방에 들어왔어요. 이제 같이 고칠 수 있어요.');
   }
 
   // ── 방 열기 ──
@@ -277,11 +279,14 @@
   }
 
   // ── 참여 ──
-  async function onJoin(name, rawCode) {
+  // opts.rejoin: 저장·새로고침으로 페이지가 새로 열린 참가자가 같은 방에 다시 들어감(그때의 참가자 id). 이 화면이 방 작품이라 묻지 않는다
+  let rejoined = false;
+  async function onJoin(name, rawCode, opts = {}) {
     if (S.mode !== 'idle') return;
     const code = Net.normCode(rawCode);
     if (!/^[a-z0-9]{4}-[a-z0-9]{4}$/.test(code)) { ui.toast('초대 코드 모양이 달라요 (예: abcd-ef23)', 'warn'); return; }
-    if (location.pathname.replace(/\/+$/, '') !== '/ws/new') {
+    rejoined = !!opts.rejoin;
+    if (!rejoined && location.pathname.replace(/\/+$/, '') !== '/ws/new') {
       const go = await ui.ask({
         title: '새 작품 화면에서 참여해요',
         body: '지금 열린 작품에서 참여하면, 방 작품을 저장할 때 이 작품을 덮어쓸 수 있어요.\n새 작품 화면으로 옮겨서 참여합니다.',
@@ -291,7 +296,7 @@
       return;
     }
     if (!adapter.ready()) { ui.toast('엔트리 편집기가 아직 준비되지 않았어요.', 'warn'); return; }
-    if (!adapter.isDefaultProject()) {
+    if (!rejoined && !adapter.isDefaultProject()) {
       const ok = await ui.ask({
         title: '방 작품으로 바꿀까요?',
         body: '참여하면 지금 화면의 작품이 방 작품으로 바뀌고, 이 화면에서 만든 것은 사라져요.',
@@ -300,7 +305,7 @@
       if (ok !== 0) return;
     }
     adapter.ensureHooks();
-    S.name = name; S.code = code; S.role = 'guest'; S.cid = randomId();
+    S.name = name; S.code = code; S.role = 'guest'; S.cid = rejoined ? opts.rejoin : randomId();
     S.mode = 'connecting'; render(); ui.set({ busyWhat: 'join' });
     joinTimes = { start: Date.now() };
     earlyUpd = [];
@@ -373,8 +378,39 @@
     ui.set({ joinText: null });
     lastWhere = '';
     ui.banner(null);
+    forgetRejoin();
     render();
     setTimeout(() => { leaving = false; }, 0);
+  }
+
+  // ── 저장·새로고침 뒤 같은 방에 다시 들어가기 ──
+  // 엔트리는 새 작품을 처음 저장하면 저장한 사람 계정에 만든 뒤 그 작품 주소로 페이지를 새로 연다(참가자는 새 작품 화면에서 참여하므로 늘 그렇다).
+  // 페이지가 닫히는 순간 방 정보를 이 탭에만 적어 두고, 새로 열린 페이지가 방금 저장한 그 작품이면 같은 방에 다시 들어간다
+  const REJOIN_KEY = 'entryHapjakRejoin';
+  function forgetRejoin() { try { sessionStorage.removeItem(REJOIN_KEY); } catch { /* 저장소 못 씀 */ } }
+  function rememberRejoin() {
+    if (S.role !== 'guest' || !joined || !client || !S.code) return;
+    let objs = [];
+    try { objs = JSON.parse(client.server.get('objOrder') || '[]'); } catch { /* 빈 목록 */ }
+    try { sessionStorage.setItem(REJOIN_KEY, JSON.stringify({ code: S.code, name: S.name, cid: S.cid, at: Date.now(), objs })); } catch { /* 저장소 못 씀 */ }
+  }
+  function tryRejoin() {
+    let mark = null;
+    try { mark = JSON.parse(sessionStorage.getItem(REJOIN_KEY) || 'null'); } catch { mark = null; }
+    forgetRejoin();
+    const t0 = Date.now();
+    if (!mark || !(t0 - mark.at < Sync.REJOIN_MS)) return;
+    const path = location.pathname.replace(/\/+$/, '');
+    const attempt = () => {
+      if (S.mode !== 'idle') return;
+      if (adapter.ready()) {
+        const target = Sync.rejoinTarget(mark, { path, objIds: adapter.objectIds(), isDefault: path === '/ws/new' && adapter.isDefaultProject(), now: t0 });
+        if (target) { onJoin(target.name, target.code, { rejoin: target.cid }); return; }
+      }
+      // 저장한 작품은 엔트리가 페이지를 연 뒤 늦게 불러오고, 새로고침이면 엔트리가 "작품 복구" 창에 답할 때까지 준비되지 않는다
+      if (Date.now() - t0 < 120000) setTimeout(attempt, 500);
+    };
+    attempt();
   }
 
   // ── 다른 작품을 불러왔을 때 ──
@@ -404,7 +440,11 @@
   window.addEventListener('beforeunload', e => {
     if (S.role === 'host' && S.members.length > 1) { e.preventDefault(); e.returnValue = ''; }
   });
-  window.addEventListener('pagehide', () => { if (S.role === 'host') { for (const c of conns.values()) { try { c.send({ t: 'bye' }); } catch { /* 닫힘 */ } } } });
+  window.addEventListener('pagehide', () => {
+    if (S.role === 'host') { for (const c of conns.values()) { try { c.send({ t: 'bye' }); } catch { /* 닫힘 */ } } }
+    rememberRejoin();
+  });
+  tryRejoin();
 
   // 초대 링크(#hapjak=코드)로 들어왔으면 창을 열고 코드를 채워 둔다
   const hm = location.hash.match(/hapjak=([a-z0-9-]+)/i);

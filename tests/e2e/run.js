@@ -5,7 +5,9 @@ const fs = require('fs'), path = require('path');
 const { launch, openEntry, sleep } = require('./chrome');
 const { checker, uiClick, openPanel, converged, hasBlock } = require('./room');
 
-const ext = path.resolve(__dirname, '..', '..');
+// --ext 폴더: 이 폴더 대신 다른 확장 사본으로(돌연변이 측정 등)
+const extArg = process.argv.indexOf('--ext');
+const ext = path.resolve(extArg > 0 ? process.argv[extArg + 1] : path.resolve(__dirname, '..', '..'));
 const VERSION = require(path.join(ext, 'manifest.json')).version;
 const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 const out = path.join(__dirname, 'out', stamp);
@@ -282,12 +284,26 @@ const { results, check } = checker();
     check('문제 기록 복사가 판 번호·상태·최근 기록을 담고 알림을 띄움', diag.includes('v' + VERSION) &&/상태 room\/guest/.test(diag) && /최근 기록/.test(diag) && /복사/.test(diagToast), diagToast.slice(0, 80));
     await uiClick(B, 'button.x');
 
-    // ── 방장이 방 닫기 → 참가자 화면에 작품은 남고 방에서 나옴 ──
+    // ── 방장이 방 닫기 → 참가자 화면에 작품은 남고 방에서 나옴. 닫자마자(닫기를 마무리하는 300ms 안) 새 방을 열어도 새 방이 살아 있음 ──
+    const oldCode = await A.evalJs('__entryHapjak.status().code');
     await openPanel(A);
     await uiClick(A, 'button.danger', '방 닫기');
-    await uiClick(A, '.modal button.danger', '방 닫기');
+    const reopen = await A.evalJs(`(async () => {
+      const r = document.getElementById('entry-hapjak-root').shadowRoot;
+      const find = (sel, text) => [...r.querySelectorAll(sel)].find(e => e.textContent.includes(text) && e.getBoundingClientRect().width > 0);
+      find('.modal button.danger', '방 닫기').click();
+      const t0 = performance.now(); let b = null;
+      while (!(b = find('button.main', '새 방 만들기')) && performance.now() - t0 < 2000) await new Promise(q => setTimeout(q, 5));
+      if (b) b.click();
+      return b ? Math.round(performance.now() - t0) : null;
+    })()`);
     await B.waitFor(`__entryHapjak.status().mode === 'idle'`, 15000, '참가자 방 종료 알림');
     check('방장이 방을 닫으면 참가자는 작품을 가진 채 방에서 나옴', await B.evalJs(hasBlock('e2eUndoB')));
+    const newCode = await A.waitFor(`(s => s.mode === 'room' && s.code !== ${JSON.stringify(oldCode)} && s.code)(__entryHapjak.status())`, 30000, '새 방').catch(() => null);
+    await sleep(1500);
+    const stillOpen = await A.evalJs(`__entryHapjak.status().mode === 'room'`);
+    if (reopen == null || reopen > 250) check('방을 닫자마자 새 방을 열어도 새 방이 살아 있음', false, `BLOCKED: 닫은 뒤 ${reopen}ms에 열어 조건이 안 맞음`);
+    else check('방을 닫자마자 새 방을 열어도 새 방이 살아 있음', !!newCode && stillOpen, `닫은 뒤 ${reopen}ms에 열기, 새 코드 ${newCode}`);
   } catch (err) {
     check('시험 진행', false, String(err && err.stack || err).slice(0, 800));
     try { await A?.screenshot(path.join(out, 'fail-A.png')); await B?.screenshot(path.join(out, 'fail-B.png')); } catch { /* 화면 못 찍음 */ }

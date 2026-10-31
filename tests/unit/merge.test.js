@@ -145,3 +145,16 @@ test('묶음별 정리 결과를 재사용해도 전체를 정리한 것과 글�
   const o = { id: 'o', name: 'n', script: JSON.stringify(threads), entity: { x: 1 } };
   assert.deepEqual(M.objectUnits(o, [2, 3], cache), M.objectUnits(o, [2, 3]));
 });
+
+test('엔트리가 나중에 붙이는 모양 크기 기록(dimension.scaleX/Y)은 조각에 없다 — 있든 없든 같은 조각', () => {
+  const pic = (scale) => ({ id: 'p1', name: '모양', fileurl: '/a.svg', imageType: 'svg', dimension: { width: 144, height: 246, ...(scale ? { scaleX: 0.51, scaleY: 0.51 } : {}) } });
+  const obj = scale => ({ id: 'o', name: 'n', script: '[]', sprite: { pictures: [pic(scale), { ...pic(false), id: 'p2' }], sounds: [] }, selectedPictureId: 'p1' });
+  const withScale = M.objectUnits(obj(true)), without = M.objectUnits(obj(false));
+  assert.equal(withScale.obj, without.obj);
+  assert.ok(!/scaleX|scaleY/.test(withScale.obj));
+  assert.deepEqual(JSON.parse(withScale.obj).sprite.pictures[0].dimension, { width: 144, height: 246 });
+  const item = obj(true);
+  M.objectUnits(item);
+  assert.equal(item.sprite.pictures[0].dimension.scaleX, 0.51, '엔트리에서 읽은 원본은 건드리지 않음');
+  assert.equal(M.projectToUnits({ objects: [obj(true)] })['obj:o'], without.obj);
+});

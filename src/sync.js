@@ -9,7 +9,7 @@
   'use strict';
 
   // 조각 모양이 바뀌면 올린다(서로 다른 판끼리 섞이면 계속 다르게 보임)
-  const PROTOCOL = 2;
+  const PROTOCOL = 3;
   const COLORS = ['#e5484d', '#2e6ff2', '#30a46c', '#f5a524', '#8e4ec6', '#0091ff', '#e93d82', '#12a594', '#d6409f', '#3e63dd'];
   const nn = v => (v === undefined ? null : v);
 
@@ -130,7 +130,9 @@
 
   class Client {
     // adapter: exportUnits() → {key: string} | null(지금은 읽으면 안 됨)
-    //          isSafe(toApply, current) → bool, apply(toApply, current) → 통째로 다시 불러왔으면 true(동기), loadAll(units)
+    //          isSafe(toApply, current) → bool, loadAll(units)
+    //          apply(toApply, current, prevOf) → 통째로 다시 불러왔으면 true(동기). prevOf(key)는 그 조각의 방 직전 값
+    //          cleanLocal(key, base, mine) → 보낼 값(있으면; 화면 사정으로만 생긴 차이를 base 쪽으로 되돌림)
     // hooks: onConflict(keys), onChange(), onGap(), onApplyError(err), onSuspicious(info)
     // 브라우저의 setTimeout은 window 말고 다른 this로 부르면 Illegal invocation이라 감싸서 쓴다
     constructor({ adapter, send, hooks = {}, timers = { set: (f, ms) => setTimeout(f, ms), clear: t => clearTimeout(t) }, id = 'c' }) {
@@ -205,19 +207,30 @@
           if (this.hooks.onSuspicious) this.hooks.onSuspicious({ gone, total });
           return false;
         }
+        // 한 오브젝트의 블록 묶음(2개 이상)이 한 번에 모두 사라져도 묻는다 — 엔트리파이선 글을 블록으로 못 바꾸면 엔트리가 그 오브젝트 블록을 비운다
+        const wiped = keys.filter(k => k.startsWith('code:') && E[k] != null && count(nn(this.base.get(k))) >= 2 && count(E[k]) === 0);
+        if (wiped.length) {
+          this.paused = true;
+          if (this.hooks.onSuspicious) this.hooks.onSuspicious({ wiped });
+          return false;
+        }
       }
       this.allowMassDeleteOnce = false;
       const ch = {};
       const bases = new Map();
       for (const k of keys) {
         const b = nn(this.base.get(k));
-        ch[k] = { b, m: nn(E[k]) };
-        bases.set(k, b);
-        this.base.set(k, nn(E[k]));
+        // 내 화면에서만 다르게 그려진 몫(편집기가 명령 없이 적는 값)은 방에서 받은 값으로 되돌려 보낸다. 그것만 달랐으면 보내지 않는다
+        const m = this.adapter.cleanLocal && b != null && E[k] != null ? this.adapter.cleanLocal(k, b, E[k]) : nn(E[k]);
         this.seen.set(k, nn(E[k]));
+        if (m === b) continue;
+        ch[k] = { b, m };
+        bases.set(k, b);
+        this.base.set(k, m);
       }
+      if (!bases.size) return false;
       const pid = this.idPrefix + ':' + (++this.pidN);
-      this.inflight = { pid, keys: new Set(keys), bases };
+      this.inflight = { pid, keys: new Set(bases.keys()), bases };
       this.sendMsg({ t: 'put', pid, ch });
       if (this.hooks.onChange) this.hooks.onChange();
       return true;
@@ -272,7 +285,7 @@
           this.reconciling = true;
           let full = false;
           try {
-            full = !!this.adapter.apply(toApply, E);
+            full = !!this.adapter.apply(toApply, E, k => nn(this.base.get(k)));
           } catch (err) {
             // 내 화면이 반쯤 불러온 상태일 수 있다 — 그걸 "내 편집"으로 보내면 방 작품이 지워지므로 멈추고 알린다
             this.paused = true;
@@ -282,10 +295,14 @@
           const E2 = this.adapter.exportUnits() || E;
           for (const k of Object.keys(toApply)) { this.base.set(k, toApply[k]); this.seen.set(k, nn(E2[k])); }
           if (full) {
-            for (const k of new Set([...this.seen.keys(), ...Object.keys(E2)])) {
+            // 아직 안 보낸 내 편집이 통째로 다시 불러오는 동안 없어졌으면(남이 그 오브젝트를 지움) 알린다 — 다음에 보내는 값은 방과 같아져 방장도 충돌로 못 본다
+            const dropped = [];
+            for (const k of new Set([...this.seen.keys(), ...Object.keys(E), ...Object.keys(E2)])) {
               if (k in toApply) continue;
               if (nn(E[k]) === nn(this.seen.get(k))) this.seen.set(k, nn(E2[k]));
+              else if (nn(E[k]) !== null && nn(E2[k]) === null) dropped.push(k);
             }
+            if (dropped.length && this.hooks.onConflict) this.hooks.onConflict(dropped);
           }
         }
       }
@@ -325,5 +342,18 @@
     }
   }
 
-  return { PROTOCOL, Server, Client, COLORS };
+  // 참가자 페이지가 새로 열렸을 때(엔트리가 저장한 작품 주소로 옮김, 새로고침) 같은 방에 다시 들어갈지.
+  // 방금 저장한 그 작품(오브젝트가 방 작품과 같음)이나 빈 새 작품일 때만 — 다른 작품을 열었으면 그 작품을 방 작품으로 바꾸지 않는다
+  const REJOIN_MS = 90000;
+  function rejoinTarget(mark, { path, objIds, isDefault, now }) {
+    if (!mark || typeof mark !== 'object' || typeof mark.code !== 'string' || typeof mark.cid !== 'string') return null;
+    if (!(now >= mark.at && now - mark.at < REJOIN_MS)) return null;
+    if (!/^\/ws\/[^/]+$/.test(path || '')) return null;
+    const ids = a => (Array.isArray(a) ? a.map(String).sort().join('\n') : null);
+    const same = Array.isArray(mark.objs) && mark.objs.length > 0 && ids(mark.objs) === ids(objIds);
+    if (!same && !(path === '/ws/new' && isDefault)) return null;
+    return { code: mark.code, name: String(mark.name || ''), cid: mark.cid };
+  }
+
+  return { PROTOCOL, Server, Client, COLORS, rejoinTarget, REJOIN_MS };
 });

@@ -22,8 +22,8 @@ async function openPanel(c) {
   if (hidden) await uiClick(c, '.fab');
 }
 
-// 글상자 폭처럼 컴퓨터마다 다를 수 있는 값을 빼고 비교
-const STRIP = `(u => { const o = {}; for (const [k, v] of Object.entries(u || {})) { if (v == null) continue; if (k.startsWith('obj:')) { const x = JSON.parse(v); if (x.objectType === 'textBox' && x.entity) { delete x.entity.width; delete x.entity.height; } o[k] = JSON.stringify(x); } else o[k] = v; } return o; })`;
+// 글상자 폭, 블록에 붙은 메모 x·y처럼 각자 그려진 크기에 따라 다를 수 있는 값을 빼고 비교
+const STRIP = `(u => { const o = {}; for (const [k, v] of Object.entries(u || {})) { if (v == null) continue; if (k.startsWith('obj:')) { const x = JSON.parse(v); if (x.objectType === 'textBox' && x.entity) { delete x.entity.width; delete x.entity.height; } o[k] = JSON.stringify(x); } else if (/^(code|func):/.test(k) && v.indexOf('"comment"') >= 0) o[k] = JSON.stringify(JSON.parse(v), (kk, vv) => (kk === 'comment' && vv && typeof vv === 'object' ? { ...vv, x: 0, y: 0 } : vv)); else o[k] = v; } return o; })`;
 async function units(c, server = false) { return c.evalJs(`${STRIP}(__entryHapjak.${server ? 'serverUnits' : 'exportUnits'}())`); }
 async function converged(A, B, label, check, ms = 20000) {
   const t0 = Date.now();
@@ -50,13 +50,16 @@ async function openRoom(A, B) {
   await uiClick(A, 'input', null, 0); await A.type('방장');
   await uiClick(A, 'button.main', '새 방 만들기');
   const code = await A.waitFor(`(s => s.mode === 'room' && s.code)(__entryHapjak.status())`, 30000, '방 열림');
-  await uiClick(B, '.fab');
-  await uiClick(B, 'input', null, 0); await B.type('참가자');
-  await uiClick(B, 'input', null, 1); await B.type(code);
-  await uiClick(B, 'button.sub', '참여하기');
-  await B.waitFor(`__entryHapjak.status().mode === 'room'`, 45000, '참가자 방 입장');
+  await joinRoom(B, code);
   await A.waitFor(`__entryHapjak.status().members.length === 2`, 10000, '방장이 참가자를 봄');
   return code;
 }
+async function joinRoom(c, code, name = '참가자') {
+  await uiClick(c, '.fab');
+  await uiClick(c, 'input', null, 0); await c.type(name);
+  await uiClick(c, 'input', null, 1); await c.type(code);
+  await uiClick(c, 'button.sub', '참여하기');
+  await c.waitFor(`__entryHapjak.status().mode === 'room'`, 45000, '참가자 방 입장');
+}
 
-module.exports = { checker, uiFind, uiClick, openPanel, STRIP, units, converged, hasBlock, openRoom };
+module.exports = { checker, uiFind, uiClick, openPanel, STRIP, units, converged, hasBlock, openRoom, joinRoom };

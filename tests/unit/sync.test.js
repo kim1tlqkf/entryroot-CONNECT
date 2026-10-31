@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const M = require('../../src/merge.js');
-const { Server, Client, PROTOCOL } = require('../../src/sync.js');
+const { Server, Client, PROTOCOL, rejoinTarget } = require('../../src/sync.js');
 
 const S = M.stable;
 function rng(seed) {
@@ -240,6 +240,41 @@ test('반영을 미루는 동안(끌기 중) 고친 것도 잃지 않는다', ()
   assert.ok(code.includes('host1') && code.includes('guest1'));
 });
 
+test('안 보낸 편집이 있는 오브젝트를 남이 먼저 지우면, 편집이 사라졌다고 알린다', () => {
+  const room = makeRoom(2, 8);
+  settle(room);
+  const u1 = room.editors[1].units; const c1 = JSON.parse(u1['code:o2']); c1.push([{ id: 'unsent', type: 'when_run_button_click', x: 0, y: 0 }]);
+  room.editors[1].units = { ...u1, 'code:o2': S(c1) };
+  const u0 = { ...room.editors[0].units }; delete u0['obj:o2']; delete u0['code:o2'];
+  room.editors[0].units = u0;
+  room.clients[0].reconcile();
+  settle(room);
+  assertConverged(room);
+  assert.equal(room.server.snapshot()['obj:o2'], undefined);
+  assert.deepEqual(room.conflicts.filter(([i]) => i === 1).flatMap(([, keys]) => keys), ['code:o2']);
+});
+
+test('한 오브젝트의 블록 묶음이 한 번에 모두 사라지면 보내기 전에 멈추고, 사람이 고르면 그때 보낸다', () => {
+  const room = makeRoom(2, 9);
+  settle(room);
+  const u0 = room.editors[0].units; const c0 = JSON.parse(u0['code:o1']); c0.push([{ id: 'second', type: 'when_run_button_click', x: 0, y: 0 }]);
+  room.editors[0].units = { ...u0, 'code:o1': S(c0) };
+  room.clients[0].reconcile();
+  settle(room);
+  const threads = () => JSON.parse(room.server.snapshot()['code:o1']).length;
+  assert.equal(threads(), 2);
+  // 엔트리파이선 글을 블록으로 못 바꾸면 엔트리가 그 오브젝트 블록을 비우는 것과 같은 모양
+  room.editors[1].units = { ...room.editors[1].units, 'code:o1': '[]' };
+  room.clients[1].reconcile();
+  while (room.deliverOne());
+  assert.equal(room.clients[1].paused, true);
+  assert.equal(room.massAsks(), 1);
+  assert.equal(threads(), 2, '묻기 전에는 방 작품이 그대로');
+  room.clients[1].resume({ allowMassDelete: true });
+  while (room.deliverOne());
+  assert.equal(threads(), 0, '방에도 지우기를 고르면 보냄');
+});
+
 test('보낸 직후 연결이 끊겨도 다시 붙으면 그 편집이 살아남는다', () => {
   const room = makeRoom(2, 5);
   settle(room);
@@ -291,3 +326,60 @@ for (const seed of [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 
     }
   });
 }
+
+test('편집기가 화면 사정으로만 바꾼 값(cleanLocal이 되돌리는 것)은 보내지 않고, 진짜 편집에는 방 값으로 실어 보낸다', () => {
+  const room = makeRoom(2, 7);
+  const settle = () => { for (let i = 0; i < 10000 && room.deliverOne(); i++); };
+  settle();
+  // 블록에 붙은 메모 x만 다른 묶음은 방 값으로(엔트리 메모가 블록 폭에 맞춰 명령 없이 밀리는 것과 같은 모양)
+  const commentFree = th => JSON.stringify(th, (k, v) => (k === 'comment' && v && typeof v === 'object' ? { ...v, x: 0 } : v));
+  const cleanLocal = (k, base, mine) => {
+    if (!k.startsWith('code:')) return mine;
+    const bt = JSON.parse(base), mt = JSON.parse(mine);
+    const byKey = new Map(bt.map((th, i) => [M.threadKey(th, i), th]));
+    let changed = false;
+    const out = mt.map((th, i) => { const b = byKey.get(M.threadKey(th, i)); if (b && JSON.stringify(b) !== JSON.stringify(th) && commentFree(b) === commentFree(th)) { changed = true; return b; } return th; });
+    return changed ? S(out) : mine;
+  };
+  for (const ed of room.editors) ed.cleanLocal = cleanLocal;
+  const withComment = (u, x, extra = []) => {
+    const th = JSON.parse(u['code:o1']);
+    th[0][0].comment = { x, y: 9, width: 160, height: 160, value: '메모', type: 'comment' };
+    return { ...u, 'code:o1': S([...th, ...extra]) };
+  };
+  room.editors[0].units = withComment(room.editors[0].units, 100);
+  room.clients[0].reconcile(); settle();
+  const roomComment = () => JSON.parse(room.server.snapshot()['code:o1'])[0][0].comment.x;
+  assert.equal(roomComment(), 100);
+  assert.equal(JSON.parse(room.editors[1].units['code:o1'])[0][0].comment.x, 100);
+
+  const putsBefore = room.msgs();
+  room.editors[1].units = withComment(room.editors[1].units, 130);
+  room.clients[1].reconcile(); settle();
+  assert.equal(room.msgs(), putsBefore, '화면 사정으로 밀린 메모는 보내지 않음');
+  assert.equal(roomComment(), 100);
+
+  const u = room.editors[1].units;
+  room.editors[1].units = { ...u, 'code:o1': S([...JSON.parse(u['code:o1']), [{ id: 'g1', type: 'when_run_button_click', x: 400, y: 0 }]]) };
+  room.clients[1].reconcile(); settle();
+  const snap = JSON.parse(room.server.snapshot()['code:o1']);
+  assert.ok(snap.some(th => th[0].id === 'g1'), '진짜 편집은 감');
+  assert.equal(snap[0][0].comment.x, 100, '같이 실린 메모 자리는 방 값 그대로');
+  assert.equal(JSON.parse(room.editors[0].units['code:o1'])[0][0].comment.x, 100);
+  assert.ok(JSON.parse(room.editors[0].units['code:o1']).some(th => th[0].id === 'g1'));
+});
+
+test('참가자 페이지가 새로 열렸을 때: 방금 저장한 그 작품이나 빈 새 작품일 때만 같은 방에 다시 들어간다', () => {
+  const mark = { code: 'abcd-ef23', name: '참가자', cid: 'c1', at: 1000, objs: ['o1', 'o2'] };
+  const at = (extra) => rejoinTarget(mark, { path: '/ws/p123', objIds: ['o2', 'o1'], isDefault: false, now: 5000, ...extra });
+  assert.deepEqual(at(), { code: 'abcd-ef23', name: '참가자', cid: 'c1' }, '저장한 작품(오브젝트가 방 작품과 같음)');
+  assert.equal(at({ objIds: ['o1', 'x9'] }), null, '다른 작품을 열었으면 그 작품을 방 작품으로 바꾸지 않는다');
+  assert.equal(at({ objIds: [] }), null, '아직 작품을 다 안 불러옴');
+  assert.ok(at({ path: '/ws/new', objIds: ['o9'], isDefault: true }), '새로고침한 빈 새 작품');
+  assert.equal(at({ path: '/ws/new', objIds: ['o9'], isDefault: false }), null, '새 작품 화면에 다른 작품이 들어 있음');
+  assert.equal(at({ path: '/project/p123' }), null, '작품 만들기 화면이 아님');
+  assert.equal(at({ now: 1000 + 90000 }), null, '너무 오래 지남');
+  assert.equal(at({ now: 500 }), null, '시계가 거꾸로');
+  assert.equal(rejoinTarget(null, { path: '/ws/p123', objIds: ['o1'], now: 5000 }), null);
+  assert.equal(rejoinTarget({ ...mark, cid: undefined }, { path: '/ws/p123', objIds: ['o1', 'o2'], now: 5000 }), null);
+});
