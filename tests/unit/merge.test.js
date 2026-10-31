@@ -158,3 +158,26 @@ test('엔트리가 나중에 붙이는 모양 크기 기록(dimension.scaleX/Y)�
   assert.equal(item.sprite.pictures[0].dimension.scaleX, 0.51, '엔트리에서 읽은 원본은 건드리지 않음');
   assert.equal(M.projectToUnits({ objects: [obj(true)] })['obj:o'], without.obj);
 });
+
+test('엔트리루트가 화면에서만 쓰는 흐름 블록은 조각에 저장본과 같은 순정 블록으로 들어간다', () => {
+  const hex = 'ab'.repeat(12);
+  const flow = (native, params, extra = {}) => ({ id: native + '1', type: `entryroot_flow_${hex}_${native}`, params: [...params, 'default'], statements: [], ...extra });
+  const nat = (native, params, extra = {}) => ({ id: native + '1', type: native, params, statements: [], ...extra });
+  const num = id => ({ id, type: 'number', params: [10], statements: [] });
+  const head = { id: 'h', type: 'when_run_button_click', x: 5, y: 6, params: [null], statements: [] };
+  const live = [[head, flow('repeat_basic', [num('n1'), null], { statements: [[flow('move_direction', [num('n2'), null])]] })]];
+  const saved = [[head, nat('repeat_basic', [num('n1'), null], { statements: [[nat('move_direction', [num('n2'), null])]] })]];
+  const code = s => M.objectUnits({ id: 'o', name: 'n', script: JSON.stringify(s) }).code;
+  const func = s => M.funcUnit({ id: 'f', type: 'normal', localVariables: [], useLocalVariables: false, content: JSON.stringify(s) });
+  assert.equal(code(live), code(saved));
+  assert.equal(func(live), func(saved));
+  assert.ok(!code(live).includes('entryroot_flow_'));
+  // 값 칸 안에 든 흐름 블록과, 이름만 비슷한 사용자 글자는 구분한다
+  const inParam = [[head, nat('move_direction', [flow('calc_basic', [num('n3')]), null])]];
+  assert.ok(!code(inParam).includes('entryroot_flow_'));
+  // 기본이 아닌 값(시간 속도 등)을 고른 블록도 순정으로 보낸다 — 그대로 보내면 받는 쪽 엔트리가 모르는 블록에서 멈춘다
+  const scaled = [[head, { ...flow('repeat_basic', [num('n1'), null]), params: [num('n1'), null, 'scaled'] }]];
+  assert.equal(code(scaled), code([[head, nat('repeat_basic', [num('n1'), null])]]));
+  const text = [[head, nat('dialog', [{ id: 't', type: 'text', params: ['entryroot_flow_글자'], statements: [] }, null])]];
+  assert.equal(code(text), M.stable(JSON.parse(JSON.stringify(text))));
+});
