@@ -64,9 +64,30 @@
     return v;
   }
 
+  // 엔트리루트는 순정 블록을 화면에서만 전용 블록(entryroot_flow_<hex>_<순정 이름>)으로 바꿔 보여 주고 저장할 때 되돌린다.
+  // 편집기를 직접 읽으면 전용 블록이 그대로 나오는데, 엔트리루트가 없는 사람의 엔트리는 모르는 블록에서 불러오기가 끊긴다.
+  // "기본"(맨 끝 값 default)은 순정 블록과 동작이 같으므로 저장본과 같은 모양으로 되돌린다.
+  // 다른 값(시간 속도 등)도 맨 끝 칸만 빼고 순정으로 보낸다 — 고른 사람의 화면에는 그대로 남고, 다른 사람에게는 기본처럼 보인다
+  const FLOW_MARK = 'entryroot_flow_';
+  const FLOW_TYPE = /^entryroot_flow_[0-9a-f]{24}_([a-z][a-z0-9_]*)$/;
+  function lowerFlow(v) {
+    if (Array.isArray(v)) {
+      let out = null;
+      v.forEach((x, i) => { const y = lowerFlow(x); if (y !== x) (out = out || v.slice())[i] = y; });
+      return out || v;
+    }
+    if (!v || typeof v !== 'object') return v;
+    const m = typeof v.type === 'string' ? FLOW_TYPE.exec(v.type) : null;
+    const isFlow = !!m && Array.isArray(v.params) && typeof v.params[v.params.length - 1] === 'string';
+    const params = lowerFlow(isFlow ? v.params.slice(0, -1) : v.params), statements = lowerFlow(v.statements);
+    if (!isFlow && params === v.params && statements === v.statements) return v;
+    return { ...v, params, statements, type: isFlow ? m[1] : v.type };
+  }
+  const portableThreads = (threads, source) => (typeof source !== 'string' || source.includes(FLOW_MARK) ? lowerFlow(threads) : threads);
+
   function canonFunc(f, off) {
     if (!f || typeof f.content !== 'string') return f;
-    return { ...f, content: canonThreads(parseScript(f.content), off) };
+    return { ...f, content: canonThreads(portableThreads(parseScript(f.content), f.content), off) };
   }
   // 함수는 통째로만 합쳐서(부분 합치기 없음) 키 정렬이 필요 없다. 큰 작품은 함수가 수 MB라 빠른 JSON.stringify를 쓴다.
   function funcUnit(f, off) {
@@ -108,7 +129,7 @@
     const rest = { ...item };
     if (rest.sprite && Array.isArray(rest.sprite.pictures)) rest.sprite = { ...rest.sprite, pictures: rest.sprite.pictures.map(canonPicture) };
     delete rest.script;
-    return { obj: stable(rest), code: codeUnit(parseScript(item.script), off, cache) };
+    return { obj: stable(rest), code: codeUnit(portableThreads(parseScript(item.script), item.script), off, cache) };
   }
 
   // offsetOf('obj:<id>' | 'func:<id>') → [dx, dy] 이 화면의 스크롤 몫

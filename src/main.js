@@ -5,7 +5,7 @@
   root.__entryHapjakLoaded = true;
 
   const { ErcSync: Sync, ErcEntry, ErcNet: Net, ErcUi, ErcMerge: M } = root;
-  const VERSION = '0.2.3';
+  const VERSION = '0.2.4';
   // 안 될 때 사용자가 "문제 기록 복사"로 붙여 넣을 수 있게 최근 기록을 모아 둔다(작품 내용은 넣지 않음)
   const diagLog = [];
   const remember = line => { diagLog.push(new Date().toTimeString().slice(0, 8) + ' ' + line); if (diagLog.length > 80) diagLog.shift(); };
