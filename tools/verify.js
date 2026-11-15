@@ -20,8 +20,11 @@ const steps = [
   ['엔트리가 명령 없이 바꾸는 값 시험', ['tests/e2e/derived.js']],
   ['편집 종류별 시험(함수·장면·리스트·소리·글상자·파이선·끊김 등)', ['tests/e2e/surfaces.js']],
   ['참가자가 저장해 페이지가 새로 열린 뒤 같은 방에 다시 들어가기 시험', ['tests/e2e/rejoin-saved.js']],
+  ['명령 없이 바꾼 것이 작품을 통째로 다시 불러와도 남는지 시험', ['tests/e2e/reload-keeps-edits.js']],
   // 엔트리루트는 이 저장소에 없다 — 폴더를 알려 주면(ENTRYROOT_EXT) 켠 사람이 방장일 때와 참가자일 때를 다 본다
   ...(process.env.ENTRYROOT_EXT ? [['엔트리루트 켠 방장·안 켠 참가자 시험', ['tests/e2e/entryroot.js']], ['안 켠 방장·엔트리루트 켠 참가자 시험', ['tests/e2e/entryroot.js', '--swap']]] : []),
+  // 저장본 작품도 이 저장소에 없다 — ENTRYROOT_FIXTURE로 엔트리루트로 저장한 작품 JSON을 알려 주면 두 모양이 섞이지 않는지 본다
+  ...(process.env.ENTRYROOT_EXT && process.env.ENTRYROOT_FIXTURE ? ['idle', 'edit', 'off-edit', 'reload'].map(order => [`엔트리루트 저장본을 안 켠 방장이 열고 켠 사람이 참가하는 시험(${order})`, ['tests/e2e/entryroot-saved.js', '--order', order]]) : []),
   // 마지막 seed는 둘이 고치는 도중에 세 번째 사람이 들어온다
   ...seeds.map((s, i) => [`무작위 편집 시험 seed ${s}${i === seeds.length - 1 ? ' (중간 참여)' : ''}`, ['tests/e2e/fuzz.js', '--seed', String(s), '--rounds', rounds, ...(i === seeds.length - 1 ? ['--join-mid'] : [])]]),
 ];

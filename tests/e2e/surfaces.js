@@ -73,6 +73,8 @@ const COMPARE = /^(code|obj|var|msg|func|scene):|^(objOrder|varOrder|msgOrder|fu
     await Promise.all([openEntry(A), openEntry(B)]);
     const HELPER = `(${pageHelper.toString()})()`;
     await Promise.all([A.evalJs(HELPER), B.evalJs(HELPER)]);
+    // 방을 열기 전부터 있는 주인 없는 지역 리스트(localList에서 본다)
+    await A.evalJs(`(Entry.variableContainer.appendVariables([{ id: 'oll', name: '주인없는목록', variableType: 'list', object: 'goneObject', array: [{ data: '7' }], visible: false, x: 5, y: 5 }]), true)`);
     await openRoom(A, B);
     check('방을 열고 참가자가 들어옴', true);
     for (const [c, name] of [[A, 'A'], [B, 'B']]) peers.push({ c, name, loads0: await c.evalJs('__sf.loads()'), excAt: c.exceptions.length, seenNotes: new Set() });
@@ -376,6 +378,88 @@ const COMPARE = /^(code|obj|var|msg|func|scene):|^(objOrder|varOrder|msgOrder|fu
         check(`편집이 사라진 쪽(${lost.name})에 알림`, await notified(lost));
         if (hasObj) { await A.evalJs(`(Entry.do('removeObject', 'dvo1'), true)`); await settle('남은 오브젝트 지우기', { B: 1 }); }
         await B.evalJs(`__sf.show(${J(o1)})`);
+      },
+      // 엔트리는 오브젝트를 지워도 지역 리스트를 남기고 그 리스트를 다른 오브젝트 블록이 읽을 수 있다 — 방을 열어도, 방에서 지워도 혼자 쓸 때와 같아야 한다
+      async localList() {
+        const lists = c => c.evalJs(`Entry.variableContainer.lists_.map(l => String(l.id_))`);
+        for (const p of peers) check(`방을 열어도 ${p.name} 화면에 주인 없는 리스트가 남음`, (await lists(p.c)).includes('oll'), J(await lists(p.c)));
+        await A.evalJs(`(Entry.do('variableContainerAddVariable', new Entry.Variable({ id: 'llv', name: '읽은값', variableType: 'variable', value: 0, visible: false })), true)`);
+        await waitAll(`!!Entry.variableContainer.getVariable('llv')`, '변수 llv');
+        await B.evalJs(`__sf.show(${J(o1)})`);
+        await B.evalJs(addThread('tll1', [{ id: 'tll1s', type: 'set_variable', params: ['llv', { id: 'tll1r', type: 'value_of_index_from_list', params: [null, 'oll', null, num('tll1n', 1)] }, null] }], 120, 520));
+        await settle('주인 없는 리스트를 읽는 블록');
+        // 엔트리는 멈출 때 변수 값을 되돌리므로 실행 중에 읽는다
+        await B.evalJs('Entry.engine.toggleRun(), true');
+        await sleep(1200);
+        const read = await B.evalJs(`Entry.variableContainer.getVariable('llv').getValue()`);
+        const toast = await B.evalJs(`[...document.querySelectorAll('.entryToast')].map(n => n.innerText.trim()).slice(0, 2)`);
+        await B.evalJs("(Entry.engine.isState('stop') || Entry.engine.toggleStop(), true)");
+        await sleep(400);
+        check('참가자가 실행해도 주인 없는 리스트를 읽음', String(read) === '7', J({ read, toast }));
+        await B.evalJs(`(Entry.do('destroyThread', Entry.playground.object.script.findById('tll1').getThread()), true)`);
+        await A.waitFor(`!${hasBlock('tll1s')}`, 15000, 'A에서 블록 지워짐');
+        await settle('읽는 블록 지우기');
+
+        const base = JSON.parse((await readUnits(A, true))['obj:' + o1]);
+        await A.evalJs(`(Entry.do('addObject', ${J({ ...base, id: 'llo1', name: '목록주인', script: '[]', sprite: { ...base.sprite, pictures: base.sprite.pictures.map((p, i) => ({ ...p, id: 'llo1p' + i })), sounds: [] }, selectedPictureId: 'llo1p0' })}, 0), true)`);
+        await B.waitFor(`!!Entry.container.getObject('llo1')`, 20000, 'B가 오브젝트 받음');
+        await A.evalJs(`(Entry.do('variableContainerAddList', { id: 'll1', name: '지역목록', variableType: 'list', object: 'llo1', array: [{ data: '1' }] }), true)`);
+        await waitAll(`!!Entry.variableContainer.getList('ll1')`, '지역 리스트 ll1');
+        await settle('지역 리스트가 있는 오브젝트 준비', { B: 1 });
+        for (const p of peers) await notified(p);
+        await A.evalJs(`(Entry.do('removeObject', 'llo1'), true)`);
+        await waitAll(`!Entry.container.getObject('llo1')`, '오브젝트 llo1 지워짐');
+        const us = await settle('지역 리스트가 있는 오브젝트 지우기', { B: 1 });
+        check('지역 리스트가 있는 오브젝트를 지워도 다시 살아나지 않고 리스트는 남음', us['obj:llo1'] == null && us['var:ll1'] != null, J({ obj: us['obj:llo1'] != null, list: us['var:ll1'] != null }));
+        check('지운 사람에게 "반영되지 않았어요" 알림이 없음', !(await notified(pA)));
+        await A.evalJs(`__sf.show(${J(o1)})`);
+      },
+      // 엔트리는 학습 모델을 불러온 뒤 따로 내려받고, 모델 없는 작품을 불러와도 앞 모델을 그대로 둔다.
+      // 받지 못한 사람이 설정을 고쳐도 방의 모델이 남고, 뺀 모델은 누가 무엇을 고쳐도 돌아오지 않아야 한다
+      async pendingModel() {
+        const model = id => ({ id, _id: id + 'o', labels: ['가'], url: 'learning/models/없는모델', type: 'text', recordTime: 3000, tableData: null });
+        const hasModel = u => !!(u && u.meta && JSON.parse(u.meta).learning);
+        const addVar = id => `Entry.do('variableContainerAddVariable', new Entry.Variable({ id: ${J(id)}, name: ${J('모델시험' + id)}, variableType: 'variable', value: 0, visible: false }));`;
+        const any = { A: 'any', B: 'any' };
+        const m1 = model('sfModel1'), m2 = model('sfModel2');
+        // 없는 주소라도 엔트리는 받은 것으로 치므로, 참가자는 내려받기가 끝나지 않는 갈래로 보낸다
+        await B.evalJs(`(Entry.aiLearning.isEnable = false, true)`);
+        await A.evalJs(`(Entry.aiLearning.load(${J(m1)}), true)`);
+        await A.waitFor('Entry.aiLearning.isLoaded', 15000, 'A가 모델을 불러옴');
+        await A.evalJs(`(() => { ${addVar('pm1')} return true; })()`);
+        await B.waitFor(`Entry.aiLearning.getId() === ${J(m1.id)}`, 20000, 'B가 모델 정보를 받음');
+        await settle('학습 모델 받기', any);
+        check('참가자가 모델을 못 받아도 조각의 모델이 방과 같음', hasModel(await readUnits(B)), J(await B.evalJs('Entry.aiLearning.isLoaded')));
+
+        await B.evalJs(`(() => { Entry.FPS = 30; ${addVar('pm2')} return true; })()`);
+        await A.waitFor(`!!Entry.variableContainer.getVariable('pm2')`, 15000, 'A가 변수 받음');
+        const us = await settle('모델을 못 받은 사람이 설정을 고침', any);
+        check('모델을 못 받은 사람이 설정을 고쳐도 방 작품의 모델이 남음', hasModel(us), us.meta && us.meta.slice(0, 200));
+        check('그 설정 변경은 방에 들어감', JSON.parse(us.meta).speed === 30, us.meta && us.meta.slice(0, 200));
+
+        // 파이썬 전환 동의와 같은 길: 엔트리가 블록을 지우고 모델을 내리지만 모델 id는 남긴다
+        await B.evalJs(`(() => { Entry.aiLearning.removeAllBlocks(); ${addVar('pm3')} return true; })()`);
+        await A.waitFor(`!!Entry.variableContainer.getVariable('pm3')`, 15000, 'A가 변수 받음');
+        const us2 = await settle('파이썬 전환으로 모델 내림', any);
+        check('파이썬 전환으로 내린 모델이 방에서도 빠짐', !hasModel(us2), us2.meta && us2.meta.slice(0, 200));
+        check('방장 화면에서도 모델이 빠짐', !(await A.evalJs('!!Entry.exportProject().learning')));
+
+        await B.evalJs(`(Entry.aiLearning.isEnable = true, true)`);
+        await A.evalJs(`(Entry.aiLearning.load(${J(m2)}), true)`);
+        await A.waitFor('Entry.aiLearning.isLoaded', 15000, 'A가 모델을 불러옴');
+        await A.evalJs(`(() => { ${addVar('pm4')} return true; })()`);
+        await B.waitFor(`Entry.aiLearning.getId() === ${J(m2.id)} && Entry.aiLearning.isLoaded`, 20000, 'B가 모델을 받음');
+        await settle('모델 다시 받기', any);
+
+        await A.evalJs(`(() => { Entry.aiLearning.removeLearningBlocks(); ${addVar('pm5')} return true; })()`);
+        await B.waitFor(`!!Entry.variableContainer.getVariable('pm5')`, 15000, 'B가 변수 받음');
+        const us3 = await settle('방장이 모델 빼기', any);
+        check('방장이 뺀 모델이 방에서 빠짐', !hasModel(us3), us3.meta && us3.meta.slice(0, 200));
+        await B.evalJs(`(() => { Entry.FPS = 60; ${addVar('pm6')} return true; })()`);
+        await A.waitFor(`!!Entry.variableContainer.getVariable('pm6')`, 15000, 'A가 변수 받음');
+        const us4 = await settle('뺀 뒤 참가자가 설정을 고침', any);
+        check('뺀 모델이 참가자의 다른 변경에 실려 돌아오지 않음', !hasModel(us4), us4.meta && us4.meta.slice(0, 200));
+        await A.evalJs(`__sf.show(${J(o1)})`); await B.evalJs(`__sf.show(${J(o1)})`);
       },
       // 참가자 연결이 끊겼다 다시 붙음: 끊긴 동안 양쪽에서 고친 것이 모두 남아야 한다
       async reconnect() {

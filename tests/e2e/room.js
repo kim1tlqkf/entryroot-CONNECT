@@ -27,7 +27,7 @@ const STRIP = `(u => { const o = {}; for (const [k, v] of Object.entries(u || {}
 async function units(c, server = false) { return c.evalJs(`${STRIP}(__entryHapjak.${server ? 'serverUnits' : 'exportUnits'}())`); }
 async function converged(A, B, label, check, ms = 20000) {
   const t0 = Date.now();
-  let diff = [];
+  let diff = [], metaDiff = '';
   while (Date.now() - t0 < ms) {
     const [ua, ub, us] = await Promise.all([units(A), units(B), units(A, true)]);
     diff = [];
@@ -36,30 +36,49 @@ async function converged(A, B, label, check, ms = 20000) {
         if (ua[k] !== us[k] || ub[k] !== us[k]) diff.push(k);
       }
       if (!diff.length) { check(label, true, `${Math.round((Date.now() - t0) / 100) / 10}초`); return true; }
+      if (diff.includes('meta')) {
+        const [ma, mb, ms2] = [ua, ub, us].map(u => JSON.parse(u.meta || '{}'));
+        const same = (x, y) => JSON.stringify(x) === JSON.stringify(y);
+        metaDiff = ' · meta 칸: ' + [...new Set([...Object.keys(ma), ...Object.keys(mb), ...Object.keys(ms2)])].filter(k => !same(ma[k], ms2[k]) || !same(mb[k], ms2[k])).join(', ');
+      }
     }
     await sleep(300);
   }
-  check(label, false, '다른 조각: ' + diff.slice(0, 8).join(', '));
+  check(label, false, '다른 조각: ' + diff.slice(0, 8).join(', ') + metaDiff);
   return false;
 }
 const hasBlock = (id) => `JSON.stringify(Entry.exportProject().objects).includes(${JSON.stringify(id)})`;
 
-// A가 방을 열고 B가 초대 코드로 들어온다
-async function openRoom(A, B) {
+async function hostRoom(A) {
   await uiClick(A, '.fab');
   await uiClick(A, 'input', null, 0); await A.type('방장');
   await uiClick(A, 'button.main', '새 방 만들기');
-  const code = await A.waitFor(`(s => s.mode === 'room' && s.code)(__entryHapjak.status())`, 30000, '방 열림');
+  return A.waitFor(`(s => s.mode === 'room' && s.code)(__entryHapjak.status())`, 30000, '방 열림');
+}
+// A가 방을 열고 B가 초대 코드로 들어온다
+async function openRoom(A, B) {
+  const code = await hostRoom(A);
   await joinRoom(B, code);
   await A.waitFor(`__entryHapjak.status().members.length === 2`, 10000, '방장이 참가자를 봄');
   return code;
 }
-async function joinRoom(c, code, name = '참가자') {
+async function joinRoom(c, code, name = '참가자', ms = 45000) {
   await uiClick(c, '.fab');
   await uiClick(c, 'input', null, 0); await c.type(name);
   await uiClick(c, 'input', null, 1); await c.type(code);
   await uiClick(c, 'button.sub', '참여하기');
-  await c.waitFor(`__entryHapjak.status().mode === 'room'`, 45000, '참가자 방 입장');
+  await c.waitFor(`__entryHapjak.status().mode === 'room'`, ms, '참가자 방 입장');
 }
 
-module.exports = { checker, uiFind, uiClick, openPanel, STRIP, units, converged, hasBlock, openRoom, joinRoom };
+// 엔트리루트 플러그인 블록을 사람처럼 끌어 놓는다
+async function dropPluginBlock(A, category, x, y) {
+  const J = JSON.stringify;
+  const id = await A.evalJs(`(() => { const t = [...document.querySelectorAll('[id^="entryCategoryerplugin_"]')].find(e => e.textContent.includes(${J(category)})); if (!t) return null; t.click(); return t.id.slice('entryCategory'.length); })()`);
+  if (!id) throw Error('플러그인 카테고리 없음: ' + category);
+  await sleep(2200);
+  const r = await A.evalJs(`(() => { const m = Entry.getMainWS().getBlockMenu(); for (const t of m.code.getThreadsByCategory(${J(id)})) { const b = t.getFirstBlock(); const g = b && b.view && b.view.svgGroup; const n = g && (g.node || g[0] || g); const r = n && n.getBoundingClientRect && n.getBoundingClientRect(); if (r && r.width > 0 && r.y > 60 && r.y < innerHeight - 40) return { x: r.x, y: r.y, w: r.width, h: r.height, type: b.type }; } return null; })()`);
+  if (!r) throw Error('플러그인 블록이 안 보임: ' + category);
+  await A.drag(r.x + Math.min(35, r.w / 2), r.y + r.h / 2, x, y, 18);
+}
+
+module.exports = { checker, uiFind, uiClick, openPanel, STRIP, units, converged, hasBlock, hostRoom, openRoom, joinRoom, dropPluginBlock };

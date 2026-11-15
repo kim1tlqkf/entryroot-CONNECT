@@ -32,6 +32,8 @@ const addThread = id => `(() => { Entry.do('addThread', [{ id: ${J(id)}, type: '
     }
     check('시험할 공개 작품을 /ws/<번호>로 엶', !!pid);
     if (!pid) return;
+    // 학습 모델은 불러온 뒤 따로 내려받아 조각 비교에 영향을 준 적이 있다 — 어떤 작품이었는지 남긴다
+    console.log('  고른 작품:', pid, '학습 모델', await A.evalJs('!!Entry.exportProject().learning'));
     await openEntry(B);
     await openRoom(A, B);
     check('방장이 그 작품으로 방을 열고 참가자가 들어옴', true);

@@ -4,7 +4,7 @@
 //   --swap: 안 켠 사람이 방장, 켠 사람이 참가자
 const fs = require('fs'), path = require('path');
 const { launch, openEntry, closeGuide, sleep } = require('./chrome');
-const { checker, converged, openRoom, joinRoom } = require('./room');
+const { checker, converged, openRoom, joinRoom, dropPluginBlock } = require('./room');
 
 const arg = (name, def) => { const i = process.argv.indexOf('--' + name); return i < 0 ? def : process.argv[i + 1]; };
 const ext = path.resolve(arg('ext', path.resolve(__dirname, '..', '..')));
@@ -23,14 +23,6 @@ const addThread = (id, y) => `(() => { Entry.do('addThread', [{ id: ${J(id)}, ty
 const hasBlock = id => `Entry.container.getAllObjects().some(o => !!o.script.findById(${J(id)}))`;
 const longest = `(() => { window.__longest = 0; try { new PerformanceObserver(l => { for (const e of l.getEntries()) window.__longest = Math.max(window.__longest, e.duration); }).observe({ entryTypes: ['longtask'] }); } catch {} return true; })()`;
 
-async function dropPluginBlock(A, category, x, y) {
-  const id = await A.evalJs(`(() => { const t = [...document.querySelectorAll('[id^="entryCategoryerplugin_"]')].find(e => e.textContent.includes(${J(category)})); if (!t) return null; t.click(); return t.id.slice('entryCategory'.length); })()`);
-  if (!id) throw Error('플러그인 카테고리 없음: ' + category);
-  await sleep(2200);
-  const r = await A.evalJs(`(() => { const m = Entry.getMainWS().getBlockMenu(); for (const t of m.code.getThreadsByCategory(${J(id)})) { const b = t.getFirstBlock(); const g = b && b.view && b.view.svgGroup; const n = g && (g.node || g[0] || g); const r = n && n.getBoundingClientRect && n.getBoundingClientRect(); if (r && r.width > 0 && r.y > 60 && r.y < innerHeight - 40) return { x: r.x, y: r.y, w: r.width, h: r.height, type: b.type }; } return null; })()`);
-  if (!r) throw Error('플러그인 블록이 안 보임: ' + category);
-  await A.drag(r.x + Math.min(35, r.w / 2), r.y + r.h / 2, x, y, 18);
-}
 // 새 프로필이면 엔트리 첫 사용 안내창이 끌기를 가로챌 수 있어, 닫고 놓일 때까지 다시 끈다
 async function usePlugin(A, category, x, y) {
   const n0 = await A.evalJs('Object.keys(Entry.variableContainer.functions_).length');

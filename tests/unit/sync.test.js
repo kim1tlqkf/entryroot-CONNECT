@@ -254,6 +254,70 @@ test('안 보낸 편집이 있는 오브젝트를 남이 먼저 지우면, 편�
   assert.deepEqual(room.conflicts.filter(([i]) => i === 1).flatMap(([, keys]) => keys), ['code:o2']);
 });
 
+// 실제 어댑터처럼 평소엔 캐시를 돌려주고, 통째로 다시 불러오기 직전에만 전부 다시 읽어 rebase로 넘긴다
+function cacheEditor(ed) {
+  const read = ed.exportUnits.bind(ed);
+  let cache = read();
+  ed.exportUnits = () => cache;
+  ed.apply = (toApply, current, prevOf, rebase) => {
+    cache = read();
+    rebase(cache, false);
+    if (!Object.keys(toApply).length) return false;
+    const u = { ...ed.units };
+    for (const [k, v] of Object.entries(toApply)) { if (v == null) delete u[k]; else u[k] = v; }
+    ed.units = u;
+    cache = read();
+    return true;
+  };
+}
+const addObjectOn = (room, i, id) => {
+  const u = room.editors[i].units;
+  room.editors[i].units = { ...u, ['obj:' + id]: S({ id, name: id, objectType: 'sprite', scene: 's1', sprite: { pictures: [{ id: 'p' + id }], sounds: [] }, selectedPictureId: 'p' + id, entity: { x: 0, y: 0, width: 10 } }), ['code:' + id]: '[]' };
+  room.clients[i].reconcile();
+};
+
+test('명령 없이 바꾼 조각은 통째로 다시 불러와도 남고 방으로 간다', () => {
+  const room = makeRoom(2, 21);
+  settle(room);
+  cacheEditor(room.editors[1]);
+  room.editors[1].units = { ...room.editors[1].units, 'var:vTool': S({ id: 'vTool', name: '도구변수', value: '1' }) };
+  addObjectOn(room, 0, 'o9');
+  settle(room);
+  assertConverged(room);
+  const snap = room.server.snapshot();
+  assert.ok(snap['var:vTool'] && snap['obj:o9']);
+  assert.ok(room.editors[1].units['var:vTool']);
+});
+
+test('들어온 조각을 나도 명령 없이 고쳤으면 덮지 않고 방장이 합친다', () => {
+  const room = makeRoom(2, 22);
+  settle(room);
+  cacheEditor(room.editors[1]);
+  const edit = (i, f) => { const u = room.editors[i].units; const o = JSON.parse(u['obj:o2']); f(o); room.editors[i].units = { ...u, 'obj:o2': S(o) }; };
+  edit(1, o => { o.name = '도구이름'; });
+  edit(0, o => { o.entity.x = 77; });
+  addObjectOn(room, 0, 'o9');
+  settle(room);
+  assertConverged(room);
+  const o = JSON.parse(room.server.snapshot()['obj:o2']);
+  assert.equal(o.name, '도구이름');
+  assert.equal(o.entity.x, 77);
+});
+
+test('들어온 조각이 모두 내가 명령 없이 고친 것이면 불러오지 않고 내 편집만 보낸다', () => {
+  const room = makeRoom(2, 23);
+  settle(room);
+  cacheEditor(room.editors[1]);
+  const edit = (i, name) => { const u = room.editors[i].units; const o = JSON.parse(u['obj:o2']); o.name = name; room.editors[i].units = { ...u, 'obj:o2': S(o) }; };
+  edit(1, '도구이름');
+  edit(0, '방장이름');
+  room.clients[0].reconcile();
+  settle(room);
+  assertConverged(room);
+  assert.equal(JSON.parse(room.server.snapshot()['obj:o2']).name, '방장이름');
+  assert.deepEqual(room.conflicts.filter(([i]) => i === 1).flatMap(([, keys]) => keys), ['obj:o2']);
+});
+
 test('한 오브젝트의 블록 묶음이 한 번에 모두 사라지면 보내기 전에 멈추고, 사람이 고르면 그때 보낸다', () => {
   const room = makeRoom(2, 9);
   settle(room);
@@ -382,4 +446,34 @@ test('참가자 페이지가 새로 열렸을 때: 방금 저장한 그 작품�
   assert.equal(at({ now: 500 }), null, '시계가 거꾸로');
   assert.equal(rejoinTarget(null, { path: '/ws/p123', objIds: ['o1'], now: 5000 }), null);
   assert.equal(rejoinTarget({ ...mark, cid: undefined }, { path: '/ws/p123', objIds: ['o1', 'o2'], now: 5000 }), null);
+});
+
+test('같은 작품인지는 사람이 만든 오브젝트로 본다: 엔트리루트 시스템 오브젝트는 켠 화면에서만 바뀌어도 같은 작품이다', () => {
+  const mark = { code: 'abcd-ef23', name: '참가자', cid: 'c1', at: 1000, objs: ['o1', 'o2', 'ers0oaaaa0000', 'ers0obbbb0000'] };
+  const at = (extra, m = mark) => rejoinTarget(m, { path: '/ws/new', objIds: ['o2', 'o1', 'ers0oaaaa0000', 'ers0occcc0000', 'ers0odddd0000'], isDefault: false, now: 5000, ...extra });
+  assert.deepEqual(at(), { code: 'abcd-ef23', name: '참가자', cid: 'c1' }, '되살리며 시스템 오브젝트가 늘고 바뀜');
+  assert.ok(at({ path: '/ws/p123', objIds: ['o1', 'o2'] }), '시스템 오브젝트가 없어짐');
+  assert.equal(at({ objIds: ['o1', 'x9', 'ers0oaaaa0000', 'ers0obbbb0000'] }), null, '시스템 오브젝트가 같아도 사람이 만든 오브젝트가 다르면 다른 작품');
+  assert.equal(at({ objIds: ['o1', 'ers0oaaaa0000', 'ers0obbbb0000'] }), null, '사람이 만든 오브젝트가 빠짐');
+  assert.equal(at({ objIds: ['ers0oaaaa0000', 'ers0obbbb0000'] }), null, '사람이 만든 오브젝트가 아직 안 들어옴');
+  assert.equal(at({ objIds: ['ers0oaaaa0000'] }, { ...mark, objs: ['ers0oaaaa0000'] }), null, '시스템 오브젝트뿐이면 같은 작품인지 알 수 없다');
+});
+
+test('판이 다른 참가자: 맞는 옛 규칙은 받고, 엔트리루트 작품·너무 옛 판·새 판은 까닭과 함께 거절', () => {
+  const { joinBlock, MIN_PROTOCOL } = require('../../src/sync.js');
+  const plain = { objOrder: '["o1"]', 'obj:o1': '{}', 'code:o1': '[]' };
+  const er = { ...plain, 'func:ers0abc': '{}' };
+  assert.equal(joinBlock(PROTOCOL, er), null);
+  assert.equal(joinBlock(MIN_PROTOCOL, plain), null);
+  assert.equal(joinBlock(MIN_PROTOCOL, er), 'version-entryroot');
+  assert.equal(joinBlock(MIN_PROTOCOL, { ...plain, 'var:erinfo': '{}' }), 'version-entryroot');
+  assert.equal(joinBlock(MIN_PROTOCOL - 1, plain), 'version');
+  assert.equal(joinBlock(PROTOCOL + 1, plain), 'version');
+  const sent = [];
+  const srv = new Server(er, { send: (c, m) => sent.push(m), broadcast: () => {}, app: '9.9.9' });
+  srv.onMessage('g', { t: 'hello', v: MIN_PROTOCOL, name: 'x' });
+  assert.deepEqual([sent[0].t, sent[0].why, sent[0].v, sent[0].app], ['refuse', 'version-entryroot', PROTOCOL, '9.9.9']);
+  const srv2 = new Server(plain, { send: (c, m) => sent.push(m), broadcast: () => {} });
+  srv2.onMessage('g', { t: 'hello', v: MIN_PROTOCOL, name: 'x' });
+  assert.equal(sent[1].t, 'welcome');
 });

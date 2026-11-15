@@ -76,6 +76,66 @@ test('먼저 위치를 옮긴 오브젝트를 나중에 지우면: 지우기를 
   assert.ok(last().cf.includes('obj:o1'));
 });
 
+// ── 지역 리스트: 엔트리는 오브젝트를 지워도 지역 리스트를 남기고, 주인 없는 리스트를 블록이 그대로 읽는다 ──
+const orphanList = { id: 'll', name: '남은 목록', variableType: 'list', object: 'gone', array: [{ data: '7' }] };
+function withVars(...vars) {
+  const p = M.unitsToProject(project());
+  p.variables.push(...vars);
+  return M.projectToUnits(p);
+}
+
+test('방을 열어도 주인 없는 지역 리스트가 그대로 남는다', () => {
+  const units = withVars(orphanList);
+  const { srv } = serverWith(units);
+  assert.deepEqual(srv.snapshot(), units);
+});
+
+test('다른 사람이 다른 곳을 고쳐도 주인 없는 지역 리스트는 지워지지 않고, 값을 고친 것도 남는다', () => {
+  const units = withVars(orphanList);
+  const { srv } = serverWith(units);
+  const moved = JSON.parse(units['obj:o1']); moved.entity.x = 50;
+  srv.onMessage('A', { t: 'put', pid: 'A:1', ch: { 'obj:o1': { b: units['obj:o1'], m: S(moved) } } });
+  assert.equal(srv.snapshot()['var:ll'], units['var:ll']);
+  const changed = S({ ...orphanList, array: [{ data: '8' }] });
+  srv.onMessage('A', { t: 'put', pid: 'A:2', ch: { 'var:ll': { b: units['var:ll'], m: changed } } });
+  assert.equal(srv.snapshot()['var:ll'], changed);
+});
+
+test('지역 리스트가 있는 오브젝트를 지우면: 지우기가 거절되지 않고 리스트는 남는다(엔트리와 같음)', () => {
+  const list = { id: 'll2', name: '지역 목록', variableType: 'list', object: 'o2', array: [] };
+  const units = withVars(list);
+  const { srv, last } = serverWith(units);
+  // 엔트리는 지역 리스트를 지우지 않아 지운 사람의 변경에도 없다
+  const ch = {};
+  for (const k of ['obj:o2', 'code:o2']) ch[k] = { b: units[k], m: null };
+  ch.objOrder = { b: units.objOrder, m: S(['o1', 'o3']) };
+  srv.onMessage('A', { t: 'put', pid: 'A:1', ch });
+  const s = srv.snapshot();
+  assert.equal(s['obj:o2'], undefined);
+  assert.equal(s['code:o2'], undefined);
+  assert.equal(s['var:ll2'], units['var:ll2']);
+  assert.deepEqual(last().cf, []);
+});
+
+test('이미 지워진 오브젝트에 뒤늦게 더한 지역 변수는 방에 남지 않는다', () => {
+  const base = project();
+  const { srv, last } = serverWith(base);
+  srv.onMessage('B', { t: 'put', pid: 'B:1', ch: deletionPut(base, 'o1') });
+  const late = S({ id: 'late', name: '늦은 변수', object: 'o1', value: 0 });
+  srv.onMessage('A', { t: 'put', pid: 'A:1', ch: { 'var:late': { b: null, m: late } } });
+  assert.equal(srv.snapshot()['var:late'], undefined);
+  assert.equal(last().v['var:late'], null);
+});
+
+test('주인 없는 리스트를 지웠다 되돌리면(새 조각으로 다시 들어옴) 지워지지 않는다', () => {
+  const units = withVars(orphanList);
+  const { srv } = serverWith(units);
+  srv.onMessage('A', { t: 'put', pid: 'A:1', ch: { 'var:ll': { b: units['var:ll'], m: null } } });
+  assert.equal(srv.snapshot()['var:ll'], undefined);
+  srv.onMessage('A', { t: 'put', pid: 'A:2', ch: { 'var:ll': { b: null, m: units['var:ll'] } } });
+  assert.equal(srv.snapshot()['var:ll'], units['var:ll']);
+});
+
 test('먼저 코드를 고친 오브젝트를 나중에 지우면: 고친 코드가 남는다', () => {
   const base = project();
   const { srv, last } = serverWith(base);
@@ -193,4 +253,29 @@ test('처리된 편집의 답만 못 받고 끊겼다 다시 붙어도, 그 사�
   r.cl.g.reconcile(); r.pump(); r.cl.host.reconcile(); r.pump();
   assert.ok(!r.srv.snapshot()['code:o1'].includes('"X"'), '지운 묶음이 되살아남');
   assert.ok(!r.guest.exportUnits()['code:o1'].includes('"X"'), '참가자 화면도 지운 상태여야 함');
+});
+
+test('켠 사람 화면이 저장 모양일 때 편집 모양 조각을 새로 보내지 않고 묻는다(방에 있던 조각·일반 편집·안 켠 사람은 그대로 보낸다)', () => {
+  const room = { 'var:erinfo': '{"id":"erinfo"}', 'func:ere000': '{"id":"ere000"}', 'func:ers0old': '{"id":"ers0old"}', 'code:o1': '[]' };
+  let screen = { ...room };
+  const sent = [], mixed = [];
+  const adapter = { exportUnits: () => ({ ...screen }), isSafe: () => true, apply: () => false, isHoldingSaved: () => true };
+  const c = new Client({ adapter, send: m => sent.push(m), timers: T, hooks: { onMixedForm: k => mixed.push(k) } });
+  c.startAsHost(room);
+
+  screen = { ...screen, 'code:o1': '[1]', 'func:ers0old': '{"id":"ers0old","바뀜":1}' };
+  assert.equal(c.flush(), true, '일반 편집은 나가야 함');
+  c.onUpd({ seq: 1, pid: sent[0].pid, v: { 'code:o1': '[1]', 'func:ers0old': '{"id":"ers0old","바뀜":1}' } });
+
+  screen = { ...screen, 'obj:ers0onew': '{}', 'func:ers0new': '{}', 'code:o1': '[2]' };
+  assert.equal(c.flush(), false);
+  assert.equal(sent.length, 1, '섞이는 조각은 방에 나가면 안 됨');
+  assert.deepEqual(mixed.map(k => k.sort()), [['func:ers0new', 'obj:ers0onew']]);
+  assert.equal(c.paused, true);
+
+  // 안 켠 사람이 시스템 오브젝트를 지웠다 되돌린 경우: 같은 조각이 새로 생겨도 묻지 않고 그대로 보낸다
+  const off = new Client({ adapter: { exportUnits: () => ({ 'var:erinfo': '{}', 'obj:ers0osys': '{}', 'code:o1': '[]' }), isSafe: () => true, apply: () => false, isHoldingSaved: () => false }, send: m => sent.push(m), timers: T, hooks: { onMixedForm: k => mixed.push(k) } });
+  off.startAsHost({ 'var:erinfo': '{}', 'code:o1': '[]' });
+  assert.equal(off.flush(), true, '안 켠 사람에게는 묻지 않음');
+  assert.equal(mixed.length, 1);
 });

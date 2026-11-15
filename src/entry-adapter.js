@@ -273,6 +273,23 @@
       finally { for (const x of [...movedComments]) if (x.startsWith(k + '|')) movedComments.delete(x); }
     }
 
+    // 엔트리는 학습 모델을 불러온 뒤 따로 내려받아, 받기 전이나 받지 못했을 때는 내보내기에 모델이 없다.
+    // 그 빈자리를 그대로 읽으면 "모델을 뺌"으로 방에 가서 모두의 작품에서 모델이 사라진다
+    let loadedModel;
+    function keepPendingModel(g) {
+      const ai = E().aiLearning;
+      if (g.learning !== undefined || !loadedModel || !ai || ai.isLoaded || typeof ai.getId !== 'function') return;
+      // 일부러 뺀 모델은 엔트리가 이름표까지 비운다(파이썬 전환은 모델 id를 남긴다)
+      if (String(ai.getId()) === String(loadedModel.id) && M.stable(ai.labels || []) === M.stable(loadedModel.labels || [])) g.learning = loadedModel;
+    }
+    // 엔트리는 모델 없는 작품을 불러와도 앞 작품의 모델을 그대로 둔다 — 남기면 내보내기에 되살아나 방에서 뺀 모델이 돌아온다
+    function dropStaleModel(p) {
+      const ai = E().aiLearning;
+      if (p.learning || !ai || !(ai.isLoaded || (typeof ai.getId === 'function' && ai.getId()))) return;
+      // 작품은 이미 불러왔다 — 정리가 실패해도 불러오기 실패로 치면 안 된다
+      try { ai.banBlocks(); ai.destroy(); } catch (err) { log('앞 작품 모델 정리 실패', err); }
+    }
+
     function exportUnits() {
       if (!canRead()) return null;
       try { flushLazyPositions(); } catch (err) { log('flush positions', err); }
@@ -328,6 +345,7 @@
           const g = globalsViaExport();
           if (!g) return null;
           delete g.objects; delete g.interface; delete g.functions;
+          keepPendingModel(g);
           const raw = JSON.stringify(g);
           if (!globalsCache || globalsCache.raw !== raw) globalsCache = { raw, units: M.globalUnits(g, k => offsets.get(k)) };
         }
@@ -806,6 +824,67 @@
     // 큰 작품에서 전체 내보내기는 느려서, 불러온 뒤 확인은 장면·오브젝트 id만 엔트리에서 바로 읽는다
     const loadedIds = () => { const e = E(); return M.stable([e.scene.getScenes().map(s => String(s.id)).sort(), e.container.getAllObjects().map(o => String(o.id)).sort()]); };
 
+    // 함수·변수·리스트·신호 id. 엔트리가 스스로 만드는 초시계·대답 변수는 뺀다
+    const pieceIds = (funcs, vars, msgs) => M.stable([funcs, vars, msgs].map(l => [...new Set(l.map(String))].sort()));
+    const projectPieces = p => pieceIds((p.functions || []).map(f => f.id), (p.variables || []).filter(v => v && !SYSTEM_VAR_TYPES.has(v.variableType)).map(v => v.id), (p.messages || []).map(m => m.id));
+    const loadedPieces = () => { const vc = E().variableContainer; return pieceIds(Object.keys(vc.functions_ || {}), [...(vc.variables_ || []), ...(vc.lists_ || [])].map(v => v.id_), (vc.messages_ || []).map(m => m.id)); };
+    const keptShape = p => loadedIds() === idLists(p) && loadedPieces() === projectPieces(p);
+
+    // 엔트리루트가 켠 사람 화면에서만 작품을 바꾸면(저장 모양을 되살림, 옛 판 플러그인을 새 판으로 올림) 그 화면에서 읽은 조각이 방에
+    // 섞여 안 켠 사람 엔트리가 없는 함수를 부르다 멈춘다. 그런 작품은 켠 사람도 받은 모양 그대로 둔다.
+    const SAVED_INFO = 'erinfo';
+    const isSavedForm = p => Array.isArray(p && p.variables) && p.variables.some(v => v && v.id === SAVED_INFO);
+    // ★엔트리루트의 받은 그대로 불러오기를 쓴다. 옛 판에는 없어서, 불러올 작품을 복사하지 못하면 변환 없이 불러오는 동작을 그 복사만 실패시키는 칸으로 대신한다
+    const NO_REPROJECT = { toJSON() { throw new Error('받은 그대로 불러오기'); } };
+    const artifactCompiler = () => root[Symbol.for('entryroot.artifact-compiler/1')];
+    let holdingSaved = false;
+    function loadAsReceived(p) {
+      const compiler = artifactCompiler();
+      if (compiler && typeof compiler.loadVerbatim === 'function') compiler.loadVerbatim(p);
+      else E().loadProject({ ...p, __ercNoReproject: NO_REPROJECT });
+      // 위 동작이 바뀌어 변환됐으면 섞이기 전에 멈춘다
+      if (!keptShape(p)) throw new Error('받은 모양 그대로 불러오지 못함');
+      holdingSaved = true;
+    }
+    function loadProjectAsRoom(p) {
+      const e = E();
+      if (!artifactCompiler()) { e.loadProject(p); return; }
+      if (holdingSaved || isSavedForm(p)) { loadAsReceived(p); return; }
+      // 판이 같으면 그대로 불러와 플러그인 블록으로 보인다. 옛 판 올리기는 작품을 열어 봐야 알 수 있고, 판이 바뀌면 이름의 지문이 바뀌어 id로 드러난다
+      e.loadProject(p);
+      if (keptShape(p)) return;
+      e.clearProject();
+      loadAsReceived(p);
+    }
+    // 방을 나간 켠 사람 화면은 평소 모양으로 돌린다 — 그 모양에 남으면 혼자 고칠 때 플러그인 블록이 한 벌 더 붙어 다음에 열 때 어긋난다
+    function releaseSavedForm() {
+      if (!holdingSaved) return;
+      // 평소 모양으로 못 돌리는 경우에도 방을 나갔으니 엔트리루트가 다시 맞출 수 있게 놓아준다
+      const compiler = artifactCompiler();
+      if (compiler && typeof compiler.releaseVerbatim === 'function') compiler.releaseVerbatim();
+      if (!canRead()) return;
+      const e = E(), painter = e.playground.painter;
+      // 작품을 비우면 저장 안 한 그림이 사라진다
+      if (viewMode() === 'picture' && painter && painter.file && painter.file.modified) return;
+      holdingSaved = false;
+      let p = null;
+      const pid = e.projectId;
+      try {
+        const view = captureView();
+        p = e.exportProject();
+        // 엔트리는 빈 화면을 false로 내보내고, 그걸 불러오면 기본 작품이 열린다
+        if (!p) return;
+        e.clearProject();
+        e.loadProject(p);
+        if (pid !== undefined) e.projectId = pid;
+        restoreView(view);
+        markAll(); funcsAllDirty = true;
+      } catch (err) {
+        log('평소 모양으로 되돌리지 못함', err);
+        if (p) { try { e.clearProject(); loadAsReceived(p); if (pid !== undefined) e.projectId = pid; } catch (err2) { log('받은 모양으로도 되돌리지 못함', err2); } }
+      }
+    }
+
     // 다시 불러오기가 실패하거나 일부만 들어오면 원래 작품으로 되돌리고 예외를 던진다.
     // 비워진·반쯤 찬 화면이 남으면 다음 확인 때 "내가 지운 것"으로 방 전체에 퍼지기 때문이다.
     // current: 지금 화면 조각(있으면 되돌릴 작품을 다시 내보내지 않고 이걸로 만든다)
@@ -819,7 +898,9 @@
       const project = M.unitsToProject(units, k => offsets.get(k));
       if (pid) project._id = pid;
       const want = idLists(project);
-      const load = p => { e.clearProject(); e.loadProject(p); };
+      // 나갈 때 평소 모양으로 돌리지 못한 표시가 다음 방으로 이어지지 않게 한다
+      if (opts.fresh) holdingSaved = false;
+      const load = p => { e.clearProject(); loadedModel = p.learning; loadProjectAsRoom(p); dropStaleModel(p); };
       let failure = null;
       markAll();
       applying = true;
@@ -843,9 +924,28 @@
       if (failure) throw failure;
     }
 
+    const markStale = k => {
+      if (k.startsWith('obj:') || k.startsWith('code:')) dirtyObjs.add(k.slice(k.indexOf(':') + 1));
+      else if (k.startsWith('func:')) dirtyFuncs.add(k.slice(5));
+      else globalsDirty = true;
+    };
+    // 화면 사정으로만 달라진 조각은 읽어 둔 값을 그대로 쓴다 — 내 편집이 아니다
+    function settled(fresh, current) {
+      if (fresh) for (const k of Object.keys(fresh)) if (fresh[k] !== current[k] && sameish(k, fresh[k], current[k])) fresh[k] = current[k];
+      return fresh;
+    }
+
     // 반환값: 작품을 통째로 다시 불러왔으면 true. prevOf(key): 그 조각의 방 작품 직전 값(있으면)
-    function apply(toApply, current, prevOf) {
+    // rebase(fresh, partly): 덮어쓰기 직전에 다시 읽은 조각을 넘긴다(못 읽었으면 null). partly면 toApply 일부가 이미 화면에 들어간 뒤다
+    function apply(toApply, current, prevOf, rebase) {
+      // 캐시는 명령을 거치지 않은 변경을 모른다 — 덮어쓸 조각은 지금 값으로 다시 본다
+      for (const k of Object.keys(toApply)) markStale(k);
+      const now = settled(exportUnits(), current);
+      rebase(now, false);
+      if (!now || !Object.keys(toApply).length) return false;
+      current = now;
       const p = plan(toApply, current);
+      const partly = !p.full;
       if (!p.full) {
         applying = true;
         try {
@@ -871,10 +971,18 @@
           log('부분 반영 결과가 방과 달라 다시 불러오기로', after ? bad.map(k => whereDiffers(k, after[k], toApply[k])) : bad);
         }
       }
+      // 작품 전체를 덮어쓰기 전에는 나머지 조각도 전부 읽는다
+      markAll();
+      funcsAllDirty = true;
+      let fresh = settled(exportUnits(), current);
+      // 일부를 넣은 뒤에는 그대로 둘 수 없어, 읽지 못하면 아는 조각으로라도 복구한다
+      if (!fresh && partly) fresh = current;
+      rebase(fresh, partly);
+      if (!fresh || !Object.keys(toApply).length) return false;
       const units = {};
-      for (const [k, v] of Object.entries(current)) if (v != null) units[k] = v;
+      for (const [k, v] of Object.entries(fresh)) if (v != null) units[k] = v;
       for (const [k, v] of Object.entries(toApply)) { if (v == null) delete units[k]; else units[k] = v; }
-      loadUnits(units, current);
+      loadUnits(units, fresh);
       return true;
     }
 
@@ -895,6 +1003,7 @@
 
     return {
       ready, ensureHooks, exportUnits, cleanLocal, isSafe, apply, loadAll: (units, opts) => loadUnits(units, null, opts), where, objectName, objectIds, isDefaultProject,
+      isHoldingSaved: () => holdingSaved, releaseSavedForm,
       isRunning, stopRunning, isBusy: () => pointerDown || applying, markAllDirty: markAll, scanSome,
       _offsets: offsets,
     };

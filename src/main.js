@@ -5,7 +5,7 @@
   root.__entryHapjakLoaded = true;
 
   const { ErcSync: Sync, ErcEntry, ErcNet: Net, ErcUi, ErcMerge: M } = root;
-  const VERSION = '0.2.4';
+  const VERSION = '0.2.5';
   // 안 될 때 사용자가 "문제 기록 복사"로 붙여 넣을 수 있게 최근 기록을 모아 둔다(작품 내용은 넣지 않음)
   const diagLog = [];
   const remember = line => { diagLog.push(new Date().toTimeString().slice(0, 8) + ' ' + line); if (diagLog.length > 80) diagLog.shift(); };
@@ -21,6 +21,8 @@
   let earlyUpd = [];
   const conns = new Map();
   let joinTimes = {}; // 참여 단계별 시각(느린 곳 찾기용)
+  // 방장과 맞춘 조각 규칙. 옛 방장은 자기 규칙과 다르면 번호도 안 알려 주고 거절해서, 받아 주는 옛 규칙으로 한 번 더 인사한다
+  let proto = Sync.PROTOCOL;
 
   const ui = ErcUi.create({ onHost, onJoin, onLeave, version: VERSION, diagnostics });
   const uiToast = ui.toast;
@@ -32,7 +34,7 @@
     ui.set({ mode: S.mode, role: S.role, code: S.code, myId: S.myId, members: S.members, link: S.link, sending: st.sending, waiting: st.waiting, paused: st.paused });
   }
 
-  function failText(why) {
+  function failText(why, info) {
     switch (why) {
       case 'unavailable-id': return '방 코드가 겹쳤어요. 한 번 더 눌러 주세요.';
       case 'no-room': case 'peer-unavailable': return '그 코드의 방이 없어요. 코드를 확인하고, 방장이 방을 열어 두었는지 확인해 주세요.';
@@ -40,7 +42,11 @@
         return '연결 서버(PeerJS)에 닿지 못했어요. 인터넷 연결을 확인해 주세요.';
       case 'connect-timeout': return '방장 컴퓨터와 직접 연결하지 못했어요. 학교·회사처럼 막힌 인터넷에서는 안 될 수 있어요.';
       case 'browser-incompatible': return '이 브라우저에서는 P2P 연결을 쓸 수 없어요.';
-      case 'version': return '서로 확장 버전이 달라요. 둘 다 같은 버전으로 맞춰 주세요.';
+      case 'version':
+        if (info && typeof info.v === 'number' && info.v > Sync.PROTOCOL) return `방장 확장(v${info.app || '?'})이 내 확장(v${VERSION})보다 새 판이라 같이 고칠 수 없어요. 내 확장을 GitHub에서 새로 받아 주세요.`;
+        if (info && typeof info.v === 'number') return `방장 확장(v${info.app || '?'})이 내 확장(v${VERSION})과 맞지 않아요. 방장이 확장을 GitHub에서 새로 받아 주세요.`;
+        return `방장 확장이 너무 옛 판이라 같이 고칠 수 없어요(내 확장 v${VERSION}). 방장이 확장을 GitHub에서 새로 받아 주세요.`;
+      case 'version-entryroot': return `이 방 작품에는 엔트리루트 블록이 있어서, 옛 판 확장으로는 같이 고칠 수 없어요(작품이 깨질 수 있어요). 옛 판을 쓰는 사람이 확장을 GitHub에서 새로 받아 주세요.`;
       case 'full': return '방이 가득 찼어요(최대 8명).';
       default: return `연결하지 못했어요 (${why || '알 수 없음'})`;
     }
@@ -55,7 +61,8 @@
   }
   // 평소엔 바뀐 오브젝트만 읽고, 명령을 거치지 않은 변경을 놓치지 않게 1.5초마다 오브젝트 3개씩 돌아가며 다시 본다
   setInterval(() => {
-    if (!client) return;
+    // 실행 중에 방을 나가면 평소 모양으로 못 돌린다 — 멈춘 뒤 돌리지 않으면 다음 방에 받은 모양이 이어진다
+    if (!client) { adapter.releaseSavedForm(); return; }
     adapter.ensureHooks();
     adapter.scanSome(3);
     client.reconcile();
@@ -93,10 +100,11 @@
           if (ids.length && !names.length) { ui.toast('다른 사람이 지운 오브젝트에 한 내 변경은 반영되지 않았어요.', 'warn', 7000); return; }
           ui.toast(`${names.length ? `'${names.join("', '")}' ` : ''}같은 부분을 다른 사람이 먼저 고쳐서, 내 변경 일부가 반영되지 않았어요.`, 'warn', 7000);
         },
-        onGap: () => sendToServer({ t: 'hello', v: Sync.PROTOCOL, cid: S.role === 'host' ? 'host' : S.cid, name: S.name, host: S.role === 'host' }),
+        onGap: () => sendToServer({ t: 'hello', v: S.role === 'host' ? Sync.PROTOCOL : proto, app: VERSION, cid: S.role === 'host' ? 'host' : S.cid, name: S.name, host: S.role === 'host' }),
         onChange: () => {},
         onApplyError: err => { log('방 작품 반영 실패', err); pauseReason = 'applyError'; render(); askApplyError(); },
         onSuspicious: info => { pauseReason = 'suspicious'; render(); askSuspicious(info); },
+        onMixedForm: () => { pauseReason = 'mixed'; render(); askMixedForm(); },
       },
     });
   }
@@ -131,6 +139,15 @@
     if (i == null || !client) return;
     if (i === 0) backToRoom(); else resetAll();
   }
+  async function askMixedForm() {
+    const i = await askOnce({
+      title: '이 방에서는 플러그인 블록을 쓸 수 없어요',
+      body: '이 방은 저장된 모양 그대로 열린 작품이라, 플러그인 블록을 넣으면 작품에 두 모양이 섞여요. 방에는 아직 보내지 않았어요.\n플러그인 블록으로 고치려면 엔트리루트를 켠 사람이 방을 열어 주세요.',
+      buttons: [{ label: '방 작품으로 되돌리기', kind: 'main' }, { label: '방 나가기', kind: 'danger' }],
+    });
+    if (i == null || !client) return;
+    if (i === 0) backToRoom(); else resetAll();
+  }
   async function askSuspicious({ gone, total, wiped }) {
     const names = (wiped || []).map(k => adapter.objectName(k.slice(5))).filter(Boolean);
     const i = await askOnce({
@@ -152,7 +169,11 @@
         S.myId = msg.you;
         // 다시 붙은 참가자의 위치는 방장이 모른다 — 다음 확인 때 다시 보낸다
         lastWhere = '';
-        if (S.role === 'guest' && !joined) { firstWelcome(msg); return; }
+        if (S.role === 'guest' && !joined) {
+          // 옛 방장 방은 엔트리루트 블록이 든 작품이면 두 판의 조각 모양이 달라 깨질 수 있다
+          if (proto < Sync.PROTOCOL && Sync.hasEntryRoot(msg.units)) { ui.toast(failText('version-entryroot'), 'warn', 9000); resetAll(); return; }
+          firstWelcome(msg); return;
+        }
         if (client) client.onWelcome(msg, { fresh: false });
         S.link = 'up';
         render();
@@ -163,7 +184,14 @@
         else if (S.role === 'guest' && !joined && earlyUpd.length < 1000) earlyUpd.push(msg);
         render(); return;
       case 'mem': S.members = Array.isArray(msg.members) ? msg.members : []; render(); return;
-      case 'refuse': ui.toast(failText(msg.why), 'warn', 7000); resetAll(); return;
+      case 'refuse':
+        if (msg.why === 'version' && msg.v === undefined && S.role === 'guest' && !joined && proto > Sync.MIN_PROTOCOL && conn && conn.open) {
+          proto--;
+          log('옛 방장으로 보여 규칙 ' + proto + '로 다시 인사');
+          conn.send({ t: 'hello', v: proto, app: VERSION, cid: S.cid, name: S.name });
+          return;
+        }
+        ui.toast(failText(msg.why, msg), 'warn', 9000); resetAll(); return;
       case 'bye': ui.toast('방장이 방을 닫았어요. 작품은 내 화면에 그대로 있어요.', 'warn', 8000); resetAll(); return;
     }
   }
@@ -205,6 +233,8 @@
     S.mode = 'room'; S.link = 'up';
     render();
     ui.toast(rejoined ? '페이지가 새로 열려서 같은 방에 다시 들어왔어요.' : '방에 들어왔어요. 이제 같이 고칠 수 있어요.');
+    if (proto < Sync.PROTOCOL) ui.toast('방장 확장이 옛 판이에요. 같이 고칠 수는 있지만, 방장도 GitHub에서 새 판을 받으면 더 안전해요.', 'warn', 9000);
+    if (adapter.isHoldingSaved()) ui.toast('이 방은 저장된 모양 그대로 열린 작품이라, 플러그인 블록이 함수로 보여요. 플러그인 블록으로 고치려면 엔트리루트를 켠 사람이 방을 열어 주세요.', 'warn', 10000);
   }
 
   // ── 방 열기 ──
@@ -232,6 +262,8 @@
     server = new Sync.Server(units, {
       send: sendTo,
       broadcast: msg => { for (const cid of server.members.keys()) sendTo(cid, msg); },
+      app: VERSION,
+      onRefused: r => ui.toast(`'${r.name}'님이 ${r.why === 'version-entryroot' ? '옛 판 확장이라 엔트리루트 블록이 든 이 작품에' : '맞지 않는 판의 확장이라'} 들어오지 못했어요${r.app ? `(v${r.app})` : ''}. 그분이 확장을 GitHub에서 새로 받아야 해요.`, 'warn', 9000),
     });
     client = makeClient('host');
     client.startAsHost(units);
@@ -306,6 +338,7 @@
     }
     adapter.ensureHooks();
     S.name = name; S.code = code; S.role = 'guest'; S.cid = rejoined ? opts.rejoin : randomId();
+    proto = Sync.PROTOCOL;
     S.mode = 'connecting'; render(); ui.set({ busyWhat: 'join' });
     joinTimes = { start: Date.now() };
     earlyUpd = [];
@@ -332,7 +365,7 @@
     if (handle !== guestHandle || leaving) { c.close(); return; }
     conn = c;
     if (!joined) joinTimes.connected = Date.now();
-    conn.send({ t: 'hello', v: Sync.PROTOCOL, cid: S.cid, name: S.name });
+    conn.send({ t: 'hello', v: proto, app: VERSION, cid: S.cid, name: S.name });
   }
 
   function onGuestDrop() {
@@ -379,6 +412,7 @@
     lastWhere = '';
     ui.banner(null);
     forgetRejoin();
+    adapter.releaseSavedForm();
     render();
     setTimeout(() => { leaving = false; }, 0);
   }
@@ -461,10 +495,10 @@
     let size = null;
     try { const u = adapter.exportUnits(); if (u) size = { 조각: Object.keys(u).length, KB: Math.round(Object.values(u).reduce((n, v) => n + (v ? v.length : 0), 0) / 1024) }; } catch (err) { size = String(err); }
     return [
-      `엔트리 실시간 합작 v${VERSION} (조각 규칙 ${Sync.PROTOCOL})`,
+      `엔트리 실시간 합작 v${VERSION} (조각 규칙 ${Sync.PROTOCOL}, 이 방 ${proto})`,
       `주소 ${location.pathname} · 상태 ${S.mode}/${S.role || '-'}/${S.link} · 사람 ${S.members.length}`,
       `참여 단계(ms) ${JSON.stringify(joinTimes.start ? { 연결: (joinTimes.connected || 0) - joinTimes.start, 받기: (joinTimes.welcome || 0) - (joinTimes.connected || 0), 넣기: (joinTimes.loaded || 0) - (joinTimes.welcome || 0) } : {})}`,
-      `동기화 ${JSON.stringify(st)} · 멈춤 이유 ${pauseReason || '-'} · 작품 크기 ${JSON.stringify(size)}`,
+      `동기화 ${JSON.stringify(st)} · 멈춤 이유 ${pauseReason || '-'} · 받은 모양 그대로 ${adapter.isHoldingSaved() ? '예' : '아니요'} · 작품 크기 ${JSON.stringify(size)}`,
       `브라우저 ${navigator.userAgent.replace(/^Mozilla\/5\.0 /, '').slice(0, 120)}`,
       '--- 최근 기록 ---',
       ...diagLog,
@@ -472,7 +506,7 @@
   }
 
   root.__entryHapjak = {
-    status: () => ({ mode: S.mode, role: S.role, code: S.code, myId: S.myId, link: S.link, members: S.members.map(m => ({ ...m })), client: client ? client.status() : null, sent: sentLog.slice(), joinTimes: { ...joinTimes } }),
+    status: () => ({ mode: S.mode, role: S.role, code: S.code, myId: S.myId, link: S.link, members: S.members.map(m => ({ ...m })), client: client ? client.status() : null, sent: sentLog.slice(), joinTimes: { ...joinTimes }, holding: adapter.isHoldingSaved() }),
     exportUnits: () => adapter.exportUnits(),
     diagnostics: () => diagnostics(),
     serverUnits: () => (server ? server.snapshot() : null),

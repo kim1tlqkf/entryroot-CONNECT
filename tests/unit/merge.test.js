@@ -86,6 +86,11 @@ test('순서: 한쪽만 순서를 바꾸고 다른 쪽은 추가하면 둘 다 �
   assert.deepEqual(JSON.parse(r.value), ['c', 'a', 'b', 'd']);
 });
 
+test('엔트리루트가 복구용 백업에만 넣는 기록은 방 조각에 넣지 않는다', () => {
+  const p = { objects: [], functions: [], variables: [], messages: [], speed: 60, entryRootBackupNotes: { 'entryroot.saved-identity/v1': { prof: { f: 1 } } } };
+  assert.deepEqual(JSON.parse(M.projectToUnits(p).meta), { speed: 60 });
+});
+
 test('스크롤 몫을 빼고 더하면 원래 좌표로 돌아오고, 스크롤은 조각을 바꾸지 않는다', () => {
   const p = { objects: [{ id: 'o', name: 'n', script: JSON.stringify([thread('a', 21.5, 30), thread('b', 300.25, 80)]), entity: {}, sprite: { pictures: [], sounds: [] } }], scenes: [{ id: 's', name: '장면 1' }], variables: [], messages: [], functions: [], tables: [], speed: 60, interface: { menuWidth: 280 } };
   const u0 = M.projectToUnits(p, () => [0, 0]);
@@ -118,14 +123,27 @@ test('작품 → 조각 → 작품 왕복이 같은 조각을 만든다', () => 
   assert.equal(JSON.parse(u['var:v']).value, '0');
 });
 
-test('정리: 지운 오브젝트의 코드·지역 변수는 지우고, 없는 장면의 오브젝트는 첫 장면으로', () => {
+test('정리: 주인 없는 지역 변수·리스트는 원래 있던 것이면 그대로 둔다', () => {
+  const st = new Map(Object.entries({
+    sceneOrder: S(['s1']), 'scene:s1': S({ id: 's1' }), objOrder: S(['o1']), 'obj:o1': S({ id: 'o1', scene: 's1' }), 'code:o1': S([]),
+    'var:ll': S({ id: 'll', object: 'gone', variableType: 'list', array: [{ data: '7' }] }), 'var:lv': S({ id: 'lv', object: 'gone' }), varOrder: S(['ll', 'lv']),
+  }));
+  const ch = M.normalize(st);
+  assert.ok(!ch.has('var:ll') && !ch.has('var:lv') && !ch.has('varOrder'));
+  assert.ok(st.get('var:ll') && st.get('var:lv'));
+  // 이번 변경으로 다른 조각이 들어와도 마찬가지
+  assert.ok(!M.normalize(st, ['var:other']).has('var:ll'));
+  assert.ok(st.get('var:ll'));
+});
+
+test('정리: 지운 오브젝트의 코드와 뒤늦게 더해진 지역 변수는 지우고, 없는 장면의 오브젝트는 첫 장면으로', () => {
   const st = new Map(Object.entries({
     sceneOrder: S(['s1']), 'scene:s1': S({ id: 's1' }),
     objOrder: S(['o1', 'gone']), 'obj:o1': S({ id: 'o1', scene: 's-deleted' }), 'code:o1': S([]),
     'code:gone': S([]), 'var:lv': S({ id: 'lv', object: 'gone' }), varOrder: S(['lv']),
     'obj:o2': S({ id: 'o2', scene: 's1' }),
   }));
-  const ch = M.normalize(st);
+  const ch = M.normalize(st, ['var:lv']);
   assert.equal(st.get('code:gone'), null);
   assert.equal(st.get('var:lv'), null);
   assert.equal(JSON.parse(st.get('obj:o1')).scene, 's1');

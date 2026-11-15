@@ -18,8 +18,8 @@
     ['tables', 'table', 'tableOrder'],
   ];
   const LIST_FIELDS = new Set(LISTS.map(l => l[0]));
-  // interface는 사람마다 다른 화면 배치라 나누지 않는다
-  const LOCAL_FIELDS = new Set(['interface', '_id']);
+  // interface는 사람마다 다른 화면 배치라 나누지 않는다. entryRootBackupNotes는 엔트리루트가 그 화면의 복구용 백업에만 남기는 기록이다
+  const LOCAL_FIELDS = new Set(['interface', '_id', 'entryRootBackupNotes']);
 
   function stable(v) {
     if (v === undefined || typeof v === 'function') return undefined;
@@ -373,8 +373,8 @@
   }
 
   // ── 합친 뒤 작품이 엔트리에서 열리도록 맞추기(방 상태 전체 기준) ──
-  // state: Map(key → string|null). 바꾼 키와 값을 돌려준다.
-  function normalize(state) {
+  // state: Map(key → string|null). 바꾼 키와 값을 돌려준다. added: 이번 변경으로 새로 생긴 조각 키
+  function normalize(state, added = []) {
     const changed = new Map();
     const get = k => { const v = state.get(k); return v == null ? null : v; };
     const set = (k, v) => { if (get(k) !== v) { state.set(k, v); changed.set(k, v); } };
@@ -406,10 +406,13 @@
       if (get('code:' + id) === null) set('code:' + id, '[]');
     }
     for (const id of idsOf('code')) if (!objIds.has(id)) set('code:' + id, null);
-    for (const id of idsOf('var')) {
+    // ★엔트리는 오브젝트를 지워도 지역 리스트를 남기고, 주인 없는 리스트도 그대로 열고 블록이 읽는다 — 리스트는 주인이 없어도 지우면 작품 결과가 바뀐다.
+    // 이미 지워진 오브젝트에 뒤늦게 더해진 지역 변수만 뺀다(엔트리도 오브젝트와 함께 지우는 것)
+    for (const k of added) {
+      if (!k.startsWith('var:')) continue;
       let v;
-      try { v = JSON.parse(get('var:' + id)); } catch { continue; }
-      if (v && v.object && !objIds.has(String(v.object))) set('var:' + id, null);
+      try { v = JSON.parse(get(k)); } catch { continue; }
+      if (v && v.object && v.variableType !== 'list' && !objIds.has(String(v.object))) set(k, null);
     }
     for (const [, pre, orderKey] of LISTS) if (pre !== 'scene') fixOrder(orderKey, pre);
     return changed;
