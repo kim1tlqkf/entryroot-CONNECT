@@ -506,8 +506,13 @@ const COMPARE = /^(code|obj|var|msg|func|scene):|^(objOrder|varOrder|msgOrder|fu
         const us = await settle('다시 들어온 뒤 양쪽에서 고침');
         check('다시 들어온 뒤에도 새로 열기 전 블록과 양쪽 새 블록이 한 번씩 있음', ['trj1m', 'trj2m', 'trj3m'].every(id => countId(us, id) === 1));
         // 스스로 나간 뒤 새로 열면 다시 들어가지 않는다
-        await openPanel(B); await uiClick(B, 'button.danger', '방 나가기');
-        await B.waitFor(`__entryHapjak.status().mode === 'idle'`, 10000, 'B 나감');
+        // 창이 막 그려지는 중이면 누르기가 빗나갈 때가 있어 나갈 때까지 다시 누른다
+        let left = false;
+        for (let i = 0; i < 3 && !left; i++) {
+          await openPanel(B); await uiClick(B, 'button.danger', '방 나가기').catch(() => {});
+          left = await B.waitFor(`__entryHapjak.status().mode === 'idle'`, 5000, 'B 나감').then(() => true, () => false);
+        }
+        if (!left) throw new Error('B가 방 나가기를 눌러도 나가지 않음');
         await reopen();
         await sleep(6000);
         check('스스로 나간 뒤 새로 열면 다시 들어가지 않음', (await B.evalJs('__entryHapjak.status().mode')) === 'idle');

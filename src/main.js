@@ -5,7 +5,7 @@
   root.__entryHapjakLoaded = true;
 
   const { ErcSync: Sync, ErcEntry, ErcNet: Net, ErcUi, ErcMerge: M } = root;
-  const VERSION = '0.2.5';
+  const VERSION = '0.2.6';
   // 안 될 때 사용자가 "문제 기록 복사"로 붙여 넣을 수 있게 최근 기록을 모아 둔다(작품 내용은 넣지 않음)
   const diagLog = [];
   const remember = line => { diagLog.push(new Date().toTimeString().slice(0, 8) + ' ' + line); if (diagLog.length > 80) diagLog.shift(); };
@@ -104,7 +104,7 @@
         onChange: () => {},
         onApplyError: err => { log('방 작품 반영 실패', err); pauseReason = 'applyError'; render(); askApplyError(); },
         onSuspicious: info => { pauseReason = 'suspicious'; render(); askSuspicious(info); },
-        onMixedForm: () => { pauseReason = 'mixed'; render(); askMixedForm(); },
+        onMixedForm: () => { pauseReason = 'mixed'; render(); setTimeout(toEditForm, 0); },
       },
     });
   }
@@ -139,10 +139,27 @@
     if (i == null || !client) return;
     if (i === 0) backToRoom(); else resetAll();
   }
+  // 저장 모양 방에서 플러그인 블록을 처음 놓으면 방 작품을 엔트리루트 평소 모양으로 바꾼다 — 그대로 보내면 한 작품에 두 모양이 섞인다.
+  // 바뀐 방은 엔트리루트를 켠 사람이 방을 연 것과 같은 모양이다
+  let convertTries = 0;
+  function toEditForm() {
+    if (!client || pauseReason !== 'mixed') { convertTries = 0; return; }
+    const r = adapter.convertSavedForm();
+    if (r === 'later' && ++convertTries < 40) { setTimeout(toEditForm, 500); return; }
+    convertTries = 0;
+    if (r === 'done') {
+      pauseReason = null;
+      client.resume();
+      render();
+      ui.toast('플러그인 블록을 쓸 수 있게 방 작품을 엔트리루트 편집 모양으로 바꿨어요. 다른 사람 화면도 같이 바뀌어요.', 'info', 8000);
+      return;
+    }
+    askMixedForm();
+  }
   async function askMixedForm() {
     const i = await askOnce({
-      title: '이 방에서는 플러그인 블록을 쓸 수 없어요',
-      body: '이 방은 저장된 모양 그대로 열린 작품이라, 플러그인 블록을 넣으면 작품에 두 모양이 섞여요. 방에는 아직 보내지 않았어요.\n플러그인 블록으로 고치려면 엔트리루트를 켠 사람이 방을 열어 주세요.',
+      title: '플러그인 블록 모양으로 바꾸지 못했어요',
+      body: '이 방은 저장된 모양 그대로 열린 작품이라, 플러그인 블록을 쓰려면 방 작품을 엔트리루트 편집 모양으로 바꿔야 해요. 바꾸지 못해서 방에는 아직 보내지 않았어요.\n실행 중이거나 그리던 그림이 있으면 멈추거나 저장한 뒤 다시 놓아 보세요.',
       buttons: [{ label: '방 작품으로 되돌리기', kind: 'main' }, { label: '방 나가기', kind: 'danger' }],
     });
     if (i == null || !client) return;
@@ -234,7 +251,7 @@
     render();
     ui.toast(rejoined ? '페이지가 새로 열려서 같은 방에 다시 들어왔어요.' : '방에 들어왔어요. 이제 같이 고칠 수 있어요.');
     if (proto < Sync.PROTOCOL) ui.toast('방장 확장이 옛 판이에요. 같이 고칠 수는 있지만, 방장도 GitHub에서 새 판을 받으면 더 안전해요.', 'warn', 9000);
-    if (adapter.isHoldingSaved()) ui.toast('이 방은 저장된 모양 그대로 열린 작품이라, 플러그인 블록이 함수로 보여요. 플러그인 블록으로 고치려면 엔트리루트를 켠 사람이 방을 열어 주세요.', 'warn', 10000);
+    if (adapter.isHoldingSaved()) ui.toast('이 방은 저장된 모양 그대로 열린 작품이라, 플러그인 블록이 함수로 보여요. 플러그인 블록을 놓으면 방 작품이 엔트리루트 편집 모양으로 바뀌어요.', 'info', 10000);
   }
 
   // ── 방 열기 ──

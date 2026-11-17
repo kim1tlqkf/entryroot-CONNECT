@@ -4,7 +4,7 @@
 //   순서: idle·edit·off-edit·plugin·reload·leave·leave-paint·leave-run·rejoin(켠 참가자가 가만히/고침/안 켠 방장이 고침/플러그인 블록/새로고침/나감/
 //         그리던 그림이 있는 채 나감/실행 중에 나감/끄고 다시 들어옴), reopen(방 안에서 안 켠 방장이 저장본을 새로 열기), on-host(켠 방장·안 켠 참가자), both-on(둘 다 켬), reload-no(복구 창에 아니요), reload-other(방 안에서 --other 작품을 연 채 새로고침)
 const fs = require('fs'), path = require('path');
-const { launch, openEntry, sleep } = require('./chrome');
+const { launch, openEntry, closeGuide, sleep } = require('./chrome');
 const { checker, converged, uiClick, openPanel, hostRoom, openRoom, joinRoom, dropPluginBlock } = require('./room');
 
 const arg = (name, def) => { const i = process.argv.indexOf('--' + name); return i < 0 ? def : process.argv[i + 1]; };
@@ -200,23 +200,56 @@ async function verdict(H, off) {
       await watchRoom(H, A, 8, '고친 뒤');
     }
     if (order === 'plugin') {
-      await G.evalJs(`(() => { const o = Entry.container.getAllObjects().find(x => !/^ers0o/.test(x.id)); Entry.container.selectObject(o.id); return true; })()`);
+      const oid = await G.evalJs(`(() => { const o = Entry.container.getAllObjects().find(x => !/^ers0o/.test(x.id)); Entry.container.selectObject(o.id); return o.id; })()`);
       await sleep(1500);
+      const threadsIn = units => { try { return JSON.parse(units['code:' + oid]).length; } catch { return -1; } };
+      const th0 = threadsIn(await H.evalJs('__entryHapjak.serverUnits()'));
       const n0 = await G.evalJs(`Object.keys(Entry.variableContainer.functions_).length`);
-      let dropped = true;
-      await dropPluginBlock(G, '물리', 900, 240).catch(e => { dropped = false; console.log('  플러그인 블록을 못 끎:', e.message.slice(0, 160)); });
-      await sleep(5000);
-      console.log('  플러그인 블록 끌기:', J({ dropped, 함수: [n0, await G.evalJs(`Object.keys(Entry.variableContainer.functions_).length`)], 상태: await G.evalJs('__entryHapjak.status().client') }));
-      const asked = (await buttons(G)).some(t => t.includes('방 작품으로 되돌리기'));
-      if (dropped) check('켠 사람에게 보내기 전에 묻는다', asked);
-      if (asked) await dialogButton(G, '방 작품으로 되돌리기');
-      await sleep(3000);
+      // 첫 사용 안내창이 꾸러미를 덮으면 끌기가 빗나간다 — 함수가 늘 때까지(엔트리루트가 플러그인을 처음 붙임) 다시 끈다
+      let dropped = false, dropType = null;
+      for (let i = 0; i < 3 && !dropped; i++) {
+        await closeGuide(G);
+        dropType = await dropPluginBlock(G, '물리', 900, 240).catch(e => { console.log('  플러그인 블록을 못 끎:', e.message.slice(0, 160)); return dropType; });
+        dropped = await G.waitFor(`Object.keys(Entry.variableContainer.functions_).length > ${n0}`, 12000, '플러그인 첫 사용').then(() => true, () => false);
+      }
+      check('시험 조건: 플러그인 블록을 실제로 놓음', dropped);
+      // 묻지 않고 방 작품을 엔트리루트 편집 모양으로 바꿔 보낸다(켠 사람이 방을 연 것과 같은 모양)
+      const FUNCS = `Object.keys(Entry.variableContainer.functions_).length`;
+      const asked = [];
+      const t0 = Date.now();
+      let switched = false;
+      while (Date.now() - t0 < 60000) {
+        for (const t of await buttons(G)) if (t.includes('방 작품으로 되돌리기') && !asked.includes(t)) asked.push(t);
+        const st = await G.evalJs(`({ holding: __entryHapjak.status().holding, paused: !!(__entryHapjak.status().client || {}).paused })`);
+        const r = await room(H);
+        if (st && !st.holding && !st.paused && r && !r.erinfo) { switched = true; break; }
+        await sleep(1000);
+      }
+      console.log('  플러그인 블록 끌기:', J({ dropped, 함수: [n0, await G.evalJs(FUNCS)], 바꾸는데_초: Math.round((Date.now() - t0) / 1000), 상태: await G.evalJs('__entryHapjak.status().client') }));
+      check('플러그인 블록을 놓아도 묻는 창이 뜨지 않음', !asked.length, J(asked));
+      check('방 작품이 엔트리루트 편집 모양으로 바뀜(켠 사람 받은 모양 놓음·맞추기 안 멈춤·방에 erinfo 없음)', switched, J(await room(H)));
+      const held = await verbatimHeld(G);
+      if (held !== null) check('엔트리루트가 받은 그대로 불러오기를 놓아줌', held === false, J(held));
       await stopTyping(G);
+      await converged(H, G, '바꾼 뒤 켠 사람 화면이 방 작품과 같음', check, 30000);
+      const [fh, fg] = [await H.evalJs(FUNCS), await G.evalJs(FUNCS)];
+      check('놓은 플러그인 블록(함수)이 안 켠 사람에게도 감', fh === fg && fg > n0, J({ 안켠: fh, 켠: fg, 처음: n0 }));
+      // 놓은 블록은 꾸러미 함수 호출이다. 꾸러미 칸의 블록(ers0…)과 놓인 블록(ers0g…)은 id 가운데가 달라 꾸러미 머리 4자와 함수 끝 4자로 찾는다.
+      // 묶음 수로는 못 본다: 저장 모양 화면에서는 블록 모양이 달라 같은 자리에 놓아도 위 묶음 끝에 붙을 수 있다
+      const plug = t => { const m = /^func_ers0g?([0-9a-f]{4})[0-9a-z]*([0-9a-z]{4})$/.exec(t || ''); return m && m[1] + '..' + m[2]; };
+      const want = plug(dropType);
+      const callsIn = units => { const out = []; try { JSON.stringify(JSON.parse(units['code:' + oid]), (k, v) => { if (want && v && typeof v.type === 'string' && plug(v.type) === want) out.push(v.type); return v; }); } catch { /* 조각 없음 */ } return out.length; };
+      const [inRoom, inOff] = [callsIn(await H.evalJs('__entryHapjak.serverUnits()')), callsIn(await screenUnits(H))];
+      check('놓은 플러그인 블록이 바꾼 뒤에도 그 오브젝트에 남아 안 켠 사람에게 감', !!want && inRoom >= 1 && inOff >= 1, J({ 놓은블록: dropType, 방: inRoom, 안켠화면: inOff, 묶음: [th0, threadsIn(await H.evalJs('__entryHapjak.serverUnits()'))] }));
+      const onTab = await mine(G);
+      check('켠 사람 화면에 없는 함수 호출이 없음', !broken(onTab), J(onTab));
+      await G.evalJs(EDIT('erSvConvOn'));
+      await H.waitFor(hasThread('erSvConvOn'), 20000, '바꾼 뒤 켠 사람 편집').then(() => check('바꾼 뒤 켠 사람의 편집이 안 켠 사람에게 감', true), e => check('바꾼 뒤 켠 사람의 편집이 안 켠 사람에게 감', false, e.message));
+      await H.evalJs(EDIT('erSvConvOff'));
+      await G.waitFor(hasThread('erSvConvOff'), 20000, '바꾼 뒤 안 켠 사람 편집').then(() => check('바꾼 뒤 안 켠 사람의 편집이 켠 사람에게 감', true), e => check('바꾼 뒤 안 켠 사람의 편집이 켠 사람에게 감', false, e.message));
+      await sleep(3000);
       await watchRoom(H, A, 8, '플러그인 뒤');
-      const off = await screenUnits(H);
-      const changed = [...new Set([...Object.keys(off), ...Object.keys(offBefore)])].filter(k => off[k] !== offBefore[k]);
-      check('켠 사람이 플러그인 블록을 써도 안 켠 사람 작품이 그대로', !changed.length, J(changed.slice(0, 6)));
-      await converged(H, G, '되돌린 뒤 켠 사람 화면이 방 작품과 같음', check, 20000);
+      await converged(H, G, '편집이 오간 뒤 켠 사람 화면이 방 작품과 같음', check, 20000);
     }
     if (order === 'reload' || order === 'reload-no') {
       await stopTyping(G);

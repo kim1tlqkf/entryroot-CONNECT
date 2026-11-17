@@ -220,7 +220,8 @@
       if (!E) return false;
       const keys = this.dirtyKeys(E);
       if (!keys.length) return false;
-      // 켠 사람 화면이 받은 모양 그대로인데 플러그인 조각이 새로 생기면(플러그인 블록을 처음 씀) 한 작품에 두 모양이 생긴다 — 보내기 전에 멈춘다
+      // 켠 사람 화면이 받은 모양 그대로인데 플러그인 조각이 새로 생기면(플러그인 블록을 처음 씀) 한 작품에 두 모양이 생긴다 — 보내기 전에 멈추고 알린다.
+      // 받은 쪽이 화면을 편집 모양으로 바꾼 뒤 resume하면 바뀐 조각이 한 번에 나간다
       if (this.adapter.isHoldingSaved && this.adapter.isHoldingSaved()) {
         const added = keys.filter(k => EDIT_FORM_PIECE.test(k) && E[k] != null && nn(this.server.get(k)) === null);
         if (added.length) {

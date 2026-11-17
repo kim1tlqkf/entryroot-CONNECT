@@ -279,3 +279,25 @@ test('켠 사람 화면이 저장 모양일 때 편집 모양 조각을 새로 �
   assert.equal(off.flush(), true, '안 켠 사람에게는 묻지 않음');
   assert.equal(mixed.length, 1);
 });
+
+test('멈춘 뒤 켠 사람 화면이 편집 모양으로 바뀌면 다시 이어서 바뀐 조각을 한 번에 보낸다(저장 모양 조각은 지움)', () => {
+  const room = { 'var:erinfo': '{"id":"erinfo"}', 'func:ere000': '{"id":"ere000"}', 'code:o1': '["ere000"]', 'code:o2': '[]' };
+  let screen = { ...room }, holding = true;
+  const sent = [], mixed = [];
+  const adapter = { exportUnits: () => ({ ...screen }), isSafe: () => true, apply: () => false, isHoldingSaved: () => holding };
+  const c = new Client({ adapter, send: m => sent.push(m), timers: T, hooks: { onMixedForm: k => mixed.push(k) } });
+  c.startAsHost(room);
+  screen = { ...screen, 'func:ers0phys': '{}', 'code:o2': '["phys"]' };
+  assert.equal(c.flush(), false);
+  assert.equal(mixed.length, 1);
+  // 어댑터가 저장(낮추기)·다시 불러오기(올리기)로 화면을 바꾼 뒤
+  holding = false;
+  screen = { 'func:ers0core': '{}', 'func:ers0phys': '{}', 'code:o1': '["ers0core"]', 'code:o2': '["phys"]' };
+  c.resume();
+  assert.equal(sent.length, 1, '바꾼 화면은 한 번에 나가야 함');
+  const { ch } = sent[0];
+  assert.deepEqual(Object.keys(ch).sort(), ['code:o1', 'code:o2', 'func:ere000', 'func:ers0core', 'func:ers0phys', 'var:erinfo']);
+  assert.equal(ch['func:ere000'].m, null, '저장 모양 함수는 지워야 함');
+  assert.equal(ch['var:erinfo'].m, null, '저장 모양 표시는 지워야 함');
+  assert.equal(c.paused, false);
+});

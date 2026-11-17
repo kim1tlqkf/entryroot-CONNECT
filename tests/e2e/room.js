@@ -79,6 +79,7 @@ async function dropPluginBlock(A, category, x, y) {
   const r = await A.evalJs(`(() => { const m = Entry.getMainWS().getBlockMenu(); for (const t of m.code.getThreadsByCategory(${J(id)})) { const b = t.getFirstBlock(); const g = b && b.view && b.view.svgGroup; const n = g && (g.node || g[0] || g); const r = n && n.getBoundingClientRect && n.getBoundingClientRect(); if (r && r.width > 0 && r.y > 60 && r.y < innerHeight - 40) return { x: r.x, y: r.y, w: r.width, h: r.height, type: b.type }; } return null; })()`);
   if (!r) throw Error('플러그인 블록이 안 보임: ' + category);
   await A.drag(r.x + Math.min(35, r.w / 2), r.y + r.h / 2, x, y, 18);
+  return r.type;
 }
 
 module.exports = { checker, uiFind, uiClick, openPanel, STRIP, units, converged, hasBlock, hostRoom, openRoom, joinRoom, dropPluginBlock };

@@ -24,7 +24,7 @@ const steps = [
   // 엔트리루트는 이 저장소에 없다 — 폴더를 알려 주면(ENTRYROOT_EXT) 켠 사람이 방장일 때와 참가자일 때를 다 본다
   ...(process.env.ENTRYROOT_EXT ? [['엔트리루트 켠 방장·안 켠 참가자 시험', ['tests/e2e/entryroot.js']], ['안 켠 방장·엔트리루트 켠 참가자 시험', ['tests/e2e/entryroot.js', '--swap']]] : []),
   // 저장본 작품도 이 저장소에 없다 — ENTRYROOT_FIXTURE로 엔트리루트로 저장한 작품 JSON을 알려 주면 두 모양이 섞이지 않는지 본다
-  ...(process.env.ENTRYROOT_EXT && process.env.ENTRYROOT_FIXTURE ? ['idle', 'edit', 'off-edit', 'reload'].map(order => [`엔트리루트 저장본을 안 켠 방장이 열고 켠 사람이 참가하는 시험(${order})`, ['tests/e2e/entryroot-saved.js', '--order', order]]) : []),
+  ...(process.env.ENTRYROOT_EXT && process.env.ENTRYROOT_FIXTURE ? ['idle', 'edit', 'off-edit', 'plugin', 'reload'].map(order => [`엔트리루트 저장본을 안 켠 방장이 열고 켠 사람이 참가하는 시험(${order})`, ['tests/e2e/entryroot-saved.js', '--order', order]]) : []),
   // 마지막 seed는 둘이 고치는 도중에 세 번째 사람이 들어온다
   ...seeds.map((s, i) => [`무작위 편집 시험 seed ${s}${i === seeds.length - 1 ? ' (중간 참여)' : ''}`, ['tests/e2e/fuzz.js', '--seed', String(s), '--rounds', rounds, ...(i === seeds.length - 1 ? ['--join-mid'] : [])]]),
 ];

@@ -856,33 +856,57 @@
       e.clearProject();
       loadAsReceived(p);
     }
-    // 방을 나간 켠 사람 화면은 평소 모양으로 돌린다 — 그 모양에 남으면 혼자 고칠 때 플러그인 블록이 한 벌 더 붙어 다음에 열 때 어긋난다
-    function releaseSavedForm() {
-      if (!holdingSaved) return;
-      // 평소 모양으로 못 돌리는 경우에도 방을 나갔으니 엔트리루트가 다시 맞출 수 있게 놓아준다
-      const compiler = artifactCompiler();
-      if (compiler && typeof compiler.releaseVerbatim === 'function') compiler.releaseVerbatim();
-      if (!canRead()) return;
-      const e = E(), painter = e.playground.painter;
-      // 작품을 비우면 저장 안 한 그림이 사라진다
-      if (viewMode() === 'picture' && painter && painter.file && painter.file.modified) return;
-      holdingSaved = false;
+    // 작품을 비우면 저장 안 한 그림이 사라진다
+    const paintingUnsaved = () => { const painter = E().playground.painter; return viewMode() === 'picture' && !!(painter && painter.file && painter.file.modified); };
+    const releaseVerbatim = () => { const compiler = artifactCompiler(); if (compiler && typeof compiler.releaseVerbatim === 'function') compiler.releaseVerbatim(); };
+    const holdsSavedInfo = () => { const vc = E().variableContainer; return [...(vc.variables_ || []), ...(vc.lists_ || [])].some(v => v && v.id_ === SAVED_INFO); };
+    // 엔트리루트 저장(낮추기)을 거쳐 다시 불러온다(올리기) — 화면이 엔트리루트 평소 모양이 된다. 다시 불러왔으면 true
+    function reloadAsEditForm() {
+      const e = E(), pid = e.projectId;
       let p = null;
-      const pid = e.projectId;
       try {
         const view = captureView();
         p = e.exportProject();
         // 엔트리는 빈 화면을 false로 내보내고, 그걸 불러오면 기본 작품이 열린다
-        if (!p) return;
+        if (!p) return false;
         e.clearProject();
         e.loadProject(p);
         if (pid !== undefined) e.projectId = pid;
         restoreView(view);
         markAll(); funcsAllDirty = true;
+        return true;
       } catch (err) {
         log('평소 모양으로 되돌리지 못함', err);
         if (p) { try { e.clearProject(); loadAsReceived(p); if (pid !== undefined) e.projectId = pid; } catch (err2) { log('받은 모양으로도 되돌리지 못함', err2); } }
+        markAll(); funcsAllDirty = true;
+        return false;
       }
+    }
+    // 방을 나간 켠 사람 화면은 평소 모양으로 돌린다 — 그 모양에 남으면 혼자 고칠 때 플러그인 블록이 한 벌 더 붙어 다음에 열 때 어긋난다
+    function releaseSavedForm() {
+      if (!holdingSaved) return;
+      // 평소 모양으로 못 돌리는 경우에도 방을 나갔으니 엔트리루트가 다시 맞출 수 있게 놓아준다
+      releaseVerbatim();
+      if (!canRead() || paintingUnsaved()) return;
+      holdingSaved = false;
+      reloadAsEditForm();
+    }
+    // 방 안에서 받은 모양을 놓고 평소 모양으로 바꾼다(저장 모양 방에 플러그인 블록을 처음 놓았을 때). 바뀐 화면을 보내면 방도 그 모양이 된다.
+    // 'done' 바꿈 · 'later' 지금은 못 읽음(실행·끌기 중, 저장 안 한 그림) · 'failed' 못 바꿔 받은 모양 그대로 들고 있음
+    function convertSavedForm() {
+      if (!holdingSaved) return 'done';
+      if (!canRead() || paintingUnsaved()) return 'later';
+      releaseVerbatim();
+      holdingSaved = false;
+      const reloaded = reloadAsEditForm();
+      if (reloaded && !holdsSavedInfo()) return 'done';
+      // 올리기가 실패해 저장 모양이 남았으면 받은 그대로 다시 들어 화면만 되살아나지 않게 한다(내보낸 작품은 한 모양으로 낮춰져 있다)
+      if (!holdingSaved) {
+        try { const e = E(), pid = e.projectId, p = e.exportProject(); if (p) { e.clearProject(); loadAsReceived(p); if (pid !== undefined) e.projectId = pid; } } catch (err) { log('받은 모양으로 다시 들지 못함', err); }
+        holdingSaved = true;
+        markAll(); funcsAllDirty = true;
+      }
+      return 'failed';
     }
 
     // 다시 불러오기가 실패하거나 일부만 들어오면 원래 작품으로 되돌리고 예외를 던진다.
@@ -1003,7 +1027,7 @@
 
     return {
       ready, ensureHooks, exportUnits, cleanLocal, isSafe, apply, loadAll: (units, opts) => loadUnits(units, null, opts), where, objectName, objectIds, isDefaultProject,
-      isHoldingSaved: () => holdingSaved, releaseSavedForm,
+      isHoldingSaved: () => holdingSaved, releaseSavedForm, convertSavedForm,
       isRunning, stopRunning, isBusy: () => pointerDown || applying, markAllDirty: markAll, scanSome,
       _offsets: offsets,
     };
